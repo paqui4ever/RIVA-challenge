@@ -70,6 +70,8 @@ optimizer = AdamW(params, lr=1e-3, weight_decay=1e-4)
 # 6. TRAINING LOOP
 num_epochs = 100
 
+print("Starting Training...")
+
 for epoch in range(num_epochs):
     print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
     
