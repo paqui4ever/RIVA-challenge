@@ -3,6 +3,10 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torch.utils.tensorboard import SummaryWriter
+
+# Tensorboard writer
+writer = SummaryWriter()
 
 # Paths 
 CSV_PATH_TRAIN = './RIVA/annotations/annotations/train.csv'
@@ -69,6 +73,7 @@ optimizer = AdamW(params, lr=1e-3, weight_decay=1e-4)
 
 # 6. TRAINING LOOP
 num_epochs = 100
+global_step = 0 
 
 print("Starting Training...")
 
@@ -88,6 +93,12 @@ for epoch in range(num_epochs):
         # Forward pass returns dictionary of losses
         loss_dict = model(images, targets)
         losses = sum(loss for loss in loss_dict.values()) # Sum all losses
+
+        writer.add_scalar("Losses/total_train", losses, global_step)
+        writer.add_scalar("Losses/train_rpn_box_reg", loss_dict["loss_rpn_box_reg"], global_step)
+        writer.add_scalar("Losses/train_objectness", loss_dict["loss_objectness"], global_step)
+        writer.add_scalar("Losses/train_box_reg", loss_dict["loss_box_reg"], global_step)
+        writer.add_scalar("Losses/train_class", loss_dict["loss_classifier"], global_step)
         
         optimizer.zero_grad()
         losses.backward()
@@ -95,6 +106,8 @@ for epoch in range(num_epochs):
         
         total_loss += losses.item()
         pbar.set_postfix({'loss': f"{losses.item():.4f}"})
+
+        global_step += 1
         
     avg_loss = total_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
@@ -121,11 +134,12 @@ for epoch in range(num_epochs):
             metric.update(outputs_cpu, targets_cpu)
             
     results = metric.compute()
-    # map is 0.50:0.95 (COCO standard)
-    print(f"Validation Results:")
-    print(f"mAP (0.50:0.95): {results['map']:.4f}")
-    print(f"mAP (0.50): {results['map_50']:.4f}")
-    print(f"mAP (0.75): {results['map_75']:.4f}")
+    writer.add_scalar("Validation/mAP_50_95", results['map'], epoch)
+    writer.add_scalar("Validation/mAP_50", results['map_50'], epoch)
+    
+    print(f"Validation Results - mAP (0.50:0.95): {results['map']:.4f}")
     
     # Save Model
     # torch.save(model.state_dict(), f"checkpoints/riva_sam3_epoch_{epoch+1}.pth")
+
+writer.close()
