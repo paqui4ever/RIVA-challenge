@@ -36,8 +36,8 @@ class SAM3Backbone(nn.Module):
         # Check if vision_encoder exists, otherwise inspect structure.
         if hasattr(self.model, "vision_encoder"):
              self.vision_encoder = self.model.vision_encoder
-        elif hasattr(self.model, "image_encoder"):
-             self.vision_encoder = self.model.image_encoder
+        #elif hasattr(self.model, "image_encoder"):
+        #     self.vision_encoder = self.model.image_encoder
         else:
              print("Warning: Could not identify vision_encoder/image_encoder. Using full model for forward.")
              self.vision_encoder = self.model
@@ -47,8 +47,9 @@ class SAM3Backbone(nn.Module):
             param.requires_grad = False
             
         # Try to detect hidden size from config
+        
         self.hidden_size = 1024 # default fallback
-        try:
+        """try:
              # Check various likely paths
              if hasattr(self.model.config, "vision_config"):
                  cfg = self.model.config.vision_config
@@ -57,7 +58,7 @@ class SAM3Backbone(nn.Module):
                  elif hasattr(cfg, "backbone_config") and hasattr(cfg.backbone_config, "hidden_size"):
                      self.hidden_size = cfg.backbone_config.hidden_size
         except:
-             pass
+             pass"""
              
         self.out_channels = self.hidden_size
 
@@ -113,7 +114,7 @@ def get_sam3_faster_rcnn(num_classes, sam_checkpoint="facebook/sam3"):
     # 3. ROI Pooler (Scale 1/16 typically for SAM)
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=['0'],
-        output_size=7,
+        output_size=(7,7),
         sampling_ratio=2
     )
     
@@ -123,21 +124,17 @@ def get_sam3_faster_rcnn(num_classes, sam_checkpoint="facebook/sam3"):
         num_classes=num_classes,
         rpn_anchor_generator=rpn_anchor_generator,
         box_roi_pool=roi_pooler,
+        box_nms_thresh=0.5,
         
         # SAM3 from config uses 1008 image size (patch size 14 * 72 = 1008)
         # Previous 1024 caused shape mismatch in rotary embeddings.
+        # Size must be divisible by 7, 16 and 32
         min_size=1008, 
         max_size=1008,
-        
-        # Disable FPN features
-        # (FasterRCNN constructor handles non-FPN backbones fine as long as 
-        # features is a dict and rpn_anchor_generator matches the keys)
     )
     
     # CRITICAL: FasterRCNN defaults to size_divisible=32.
-    # 1008 is NOT divisible by 32 (1008 -> 1024).
     # This causes padding to 1024, resulting in 73x73 patches, mismatching 72x72 embeddings.
-    # Set it to 14 (patch size) or 1008 to avoid padding.
     model.transform.size_divisible = 14
     
     return model
