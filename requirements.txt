@@ -1,5 +1,9 @@
 pytest==9.0.2
 torch==2.9.1
-torchvision==0.25.0
+torchvision==0.24.1
 transformers==5.0.0
 tqdm==4.67.1
+pandas==2.3.3
+numpy==2.4.1
+albumentations==2.0.8
+pillow==12.1.0
