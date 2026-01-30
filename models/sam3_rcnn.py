@@ -49,16 +49,16 @@ class SAM3Backbone(nn.Module):
         # Try to detect hidden size from config
         
         self.hidden_size = 1024 # default fallback
-        """try:
-             # Check various likely paths
-             if hasattr(self.model.config, "vision_config"):
-                 cfg = self.model.config.vision_config
-                 if hasattr(cfg, "hidden_size"):
-                     self.hidden_size = cfg.hidden_size
-                 elif hasattr(cfg, "backbone_config") and hasattr(cfg.backbone_config, "hidden_size"):
-                     self.hidden_size = cfg.backbone_config.hidden_size
-        except:
-             pass"""
+        # try:
+        #         # Check various likely paths
+        #         if hasattr(self.model.config, "vision_config"):
+        #             cfg = self.model.config.vision_config
+        #             if hasattr(cfg, "hidden_size"):
+        #                 self.hidden_size = cfg.hidden_size
+        #             elif hasattr(cfg, "backbone_config") and hasattr(cfg.backbone_config, "hidden_size"):
+        #                 self.hidden_size = cfg.backbone_config.hidden_size
+        # except:
+        #     pass
              
         self.out_channels = self.hidden_size
 
