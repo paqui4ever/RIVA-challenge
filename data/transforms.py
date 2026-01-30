@@ -1,7 +1,6 @@
 
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-import cv2
 
 def get_train_transforms():
     """
