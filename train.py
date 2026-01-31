@@ -1,19 +1,30 @@
+import os
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.tensorboard import SummaryWriter
 
-# Tensorboard writer
-writer = SummaryWriter()
+# Checkpointing settings
+CHECKPOINT_DIR = '/local_data/RIVA/checkpoints'
+os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-# Paths 
-CSV_PATH_TRAIN = './RIVA/annotations/annotations/train.csv'
-CSV_PATH_VAL = './RIVA/annotations/annotations/val.csv'
-TRAIN_PATH = './RIVA/images/images/train'
-VAL_PATH = './RIVA/images/images/val'
-TEST_PATH = './RIVA/images/images/test'
+# Tensorboard writer (logs saved in checkpoint directory)
+writer = SummaryWriter(log_dir=os.path.join(CHECKPOINT_DIR, 'tensorboard'))
+RESUME_CHECKPOINT = None  # Set to checkpoint path to resume training, e.g., './checkpoints/best_checkpoint.pth'
+
+# Mixed precision settings
+USE_AMP = True  # Set to False to disable mixed precision
+
+# Paths
+CSV_PATH_TRAIN = '/local_data/RIVA/annotations/annotations/train.csv'
+CSV_PATH_VAL = '/local_data/RIVA/annotations/annotations/val.csv'
+TRAIN_PATH = '/local_data/RIVA/images/images/train'
+VAL_PATH = '/local_data/RIVA/images/images/val'
+TEST_PATH = '/local_data/RIVA/images/images/test'
 
 # Imports from other libraries
 try:
@@ -71,13 +82,35 @@ model.to(device)
 params = [p for p in model.parameters() if p.requires_grad]
 optimizer = AdamW(params, lr=1e-3, weight_decay=1e-4)
 
-# 6. TRAINING LOOP
+# 6. LEARNING RATE SCHEDULER
 num_epochs = 100
-global_step = 0 
+scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+
+# 7. MIXED PRECISION SCALER
+scaler = GradScaler(enabled=USE_AMP)
+
+# 8. CHECKPOINT RESUME
+start_epoch = 0
+global_step = 0
+best_map = 0.0
+
+if RESUME_CHECKPOINT and os.path.isfile(RESUME_CHECKPOINT):
+    print(f"Loading checkpoint from {RESUME_CHECKPOINT}...")
+    checkpoint = torch.load(RESUME_CHECKPOINT, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    scaler.load_state_dict(checkpoint['scaler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
+    global_step = checkpoint.get('global_step', 0)
+    best_map = checkpoint.get('best_map', 0.0)
+    print(f"Resumed from epoch {start_epoch}, global_step {global_step}, best_map {best_map:.4f}")
+
+# 9. TRAINING LOOP
 
 print("Starting Training...")
 
-for epoch in range(num_epochs):
+for epoch in range(start_epoch, num_epochs):
     print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
     
     # --- TRAINING ---
@@ -90,9 +123,13 @@ for epoch in range(num_epochs):
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         
-        # Forward pass returns dictionary of losses
-        loss_dict = model(images, targets)
-        losses = sum(loss for loss in loss_dict.values()) # Sum all losses
+        optimizer.zero_grad()
+
+        # Mixed precision forward pass
+        with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
+            # Forward pass returns dictionary of losses
+            loss_dict = model(images, targets)
+            losses = sum(loss for loss in loss_dict.values())  # Sum all losses
 
         writer.add_scalar("Losses/total_train", losses, global_step)
         writer.add_scalar("Losses/train_rpn_box_reg", loss_dict["loss_rpn_box_reg"], global_step)
@@ -100,15 +137,20 @@ for epoch in range(num_epochs):
         writer.add_scalar("Losses/train_box_reg", loss_dict["loss_box_reg"], global_step)
         writer.add_scalar("Losses/train_class", loss_dict["loss_classifier"], global_step)
         
-        optimizer.zero_grad()
-        losses.backward()
-        optimizer.step()
-        
+        # Mixed precision backward pass
+        scaler.scale(losses).backward()
+        scaler.step(optimizer)
+        scaler.update()
+
         total_loss += losses.item()
         pbar.set_postfix({'loss': f"{losses.item():.4f}"})
 
         global_step += 1
-        
+
+    # Step the scheduler after each epoch
+    scheduler.step()
+    writer.add_scalar("LearningRate", scheduler.get_last_lr()[0], epoch)
+
     avg_loss = total_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
     
@@ -122,9 +164,11 @@ for epoch in range(num_epochs):
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
-            # Forward pass in eval mode returns detections (list of dicts)
-            outputs = model(images)
-            
+            # Mixed precision inference
+            with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
+                # Forward pass in eval mode returns detections (list of dicts)
+                outputs = model(images)
+
             # Send to metric. Both outputs and targets are lists of dicts.
             # Outputs on device, targets on device - metric handles it.
             # Some metrics need CPU conversion, but torchmetrics handles recent versions.
@@ -134,12 +178,35 @@ for epoch in range(num_epochs):
             metric.update(outputs_cpu, targets_cpu)
             
     results = metric.compute()
+    current_map = results['map'].item()
     writer.add_scalar("Validation/mAP_50_95", results['map'], epoch)
     writer.add_scalar("Validation/mAP_50", results['map_50'], epoch)
     
-    print(f"Validation Results - mAP (0.50:0.95): {results['map']:.4f}")
-    
-    # Save Model
-    # torch.save(model.state_dict(), f"checkpoints/riva_sam3_epoch_{epoch+1}.pth")
+    print(f"Validation Results - mAP (0.50:0.95): {current_map:.4f}")
+
+    # --- CHECKPOINTING ---
+    checkpoint_dict = {
+        'epoch': epoch,
+        'global_step': global_step,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+        'best_map': best_map,
+        'current_map': current_map,
+    }
+
+    # Save latest checkpoint
+    latest_path = os.path.join(CHECKPOINT_DIR, 'latest_checkpoint.pth')
+    torch.save(checkpoint_dict, latest_path)
+    print(f"Saved latest checkpoint to {latest_path}")
+
+    # Save best checkpoint if current mAP is better
+    if current_map > best_map:
+        best_map = current_map
+        checkpoint_dict['best_map'] = best_map
+        best_path = os.path.join(CHECKPOINT_DIR, 'best_checkpoint.pth')
+        torch.save(checkpoint_dict, best_path)
+        print(f"New best mAP: {best_map:.4f}. Saved best checkpoint to {best_path}")
 
 writer.close()
