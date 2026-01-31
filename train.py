@@ -8,12 +8,12 @@ from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.tensorboard import SummaryWriter
 
-# Tensorboard writer
-writer = SummaryWriter()
-
 # Checkpointing settings
-CHECKPOINT_DIR = '/local_data/checkpoints'
+CHECKPOINT_DIR = '/local_data/RIVA/checkpoints'
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
+# Tensorboard writer (logs saved in checkpoint directory)
+writer = SummaryWriter(log_dir=os.path.join(CHECKPOINT_DIR, 'tensorboard'))
 RESUME_CHECKPOINT = None  # Set to checkpoint path to resume training, e.g., './checkpoints/best_checkpoint.pth'
 
 # Mixed precision settings
