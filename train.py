@@ -7,6 +7,18 @@ from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.tensorboard import SummaryWriter
+import argparse
+
+# Parser for choosing the model
+parser = argparse.ArgumentParser(description="Train SAM3 Faster R-CNN")
+parser.add_argument(
+    "--model", 
+    type=str, 
+    choices=['sam3_rcnn', 'sam3_detr'],
+    required=True,  # Make the flag mandatory
+    help="The model architecture to use (e.g., sam3_detr)"
+)
+args = parser.parse_args()
 
 # Checkpointing settings
 CHECKPOINT_DIR = '/local_data/RIVA/checkpoints'
@@ -71,10 +83,15 @@ test_loader = DataLoader(
 )
 
 # 4. MODEL INITIALIZATION
-print("Loading FasterRCNN with SAM3 backbone...")
+
 num_classes = 9 # 8 classes + background
-# Using Hugging Face 'facebook/sam3' by default
-model = get_sam3_faster_rcnn(num_classes=num_classes)
+if args.model == 'sam3_rcnn':
+    print("Loading FasterRCNN with SAM3 backbone...")
+    model = get_sam3_faster_rcnn(num_classes=num_classes)
+elif args.model == 'sam3_detr':
+    print("Loading DETR with SAM3 backbone...")
+    model = get_sam3_detr(num_classes=num_classes)
+
 model.to(device)
 
 # 5. OPTIMIZER
