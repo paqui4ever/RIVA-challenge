@@ -68,7 +68,7 @@ def main():
     parser.add_argument(
         "--output", 
         type=str, 
-        default='submission.csv',
+        default='./results/submission.csv',
         help="Output CSV filename"
     )
     parser.add_argument(
