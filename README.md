@@ -19,18 +19,35 @@ Start by downloading the projects dependencies by running
 ```cli
 pip install -r requirements.txt
 ```
+>Added one more dependency, don't forget to install it to prevent ImportError!
 
 To access the challenges training, validating and testing datasets with their respective annotations simply run ensuring you are already participating in the challenge.
 ```cli
 kaggle competitions download -c riva-cervical-cytology-challenge-isbi-2026
 ```
 
-## Training
+## 🦾 Training
 First choose which model you want to train from the ones that are in "models/" and then run:
 ```cli
 python train.py --model <MODEL_NAME>
 ```
-The only valid names are: **sam3_rcnn** for the SAM3 + Faster-RCNN and **sam3_detr** for the SAM3 + DETR
+The only valid model names are: 
+- **sam3_rcnn** for the SAM3 + Faster-RCNN 
+- **sam3_detr** for the SAM3 + DETR
+
+## 📖 Testing
+To run the functionality tests run:
+```cli
+pytest tests/
+```
+
+## 📁 Generating predictions
+
+To generate predictions over the test dataset run:
+```cli
+python predict.py --model <MODEL_NAME>
+```
+This will generate a submission.csv file in the "results/" directory.
 
 ##  📜 References
 
