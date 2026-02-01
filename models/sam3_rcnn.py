@@ -6,14 +6,7 @@ from collections import OrderedDict
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
-try:
-    from transformers import Sam3Model, Sam3Config
-except ImportError:
-    # If Sam3Model is not explicitly available in this version of transformers, 
-    # try AutoModel as it often handles new architectures if registered.
-    print("Sam3Model not found in transformers, trying to use AutoModel...")
-    from transformers import AutoModel as Sam3Model
-    from transformers import AutoConfig as Sam3Config
+from transformers import Sam3Model, Sam3Config
 
 class SAM3Backbone(nn.Module):
     """
@@ -49,16 +42,6 @@ class SAM3Backbone(nn.Module):
         # Try to detect hidden size from config
         
         self.hidden_size = 1024 # default fallback
-        # try:
-        #         # Check various likely paths
-        #         if hasattr(self.model.config, "vision_config"):
-        #             cfg = self.model.config.vision_config
-        #             if hasattr(cfg, "hidden_size"):
-        #                 self.hidden_size = cfg.hidden_size
-        #             elif hasattr(cfg, "backbone_config") and hasattr(cfg.backbone_config, "hidden_size"):
-        #                 self.hidden_size = cfg.backbone_config.hidden_size
-        # except:
-        #     pass
              
         self.out_channels = self.hidden_size
 
