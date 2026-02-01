@@ -32,6 +32,12 @@ RESUME_CHECKPOINT = None  # Set to checkpoint path to resume training, e.g., './
 USE_AMP = True  # Set to False to disable mixed precision
 
 # Paths
+# CSV_PATH_TRAIN = 'RIVA/annotations/annotations/train.csv'
+# CSV_PATH_VAL = 'RIVA/annotations/annotations/val.csv'
+# TRAIN_PATH = 'RIVA/images/images/train'
+# VAL_PATH = 'RIVA/images/images/val'
+# TEST_PATH = 'RIVA/images/images/test'
+
 CSV_PATH_TRAIN = '/local_data/RIVA/annotations/annotations/train.csv'
 CSV_PATH_VAL = '/local_data/RIVA/annotations/annotations/val.csv'
 TRAIN_PATH = '/local_data/RIVA/images/images/train'
@@ -42,6 +48,7 @@ TEST_PATH = '/local_data/RIVA/images/images/test'
 try:
     from data.dataset import BethesdaDataset
     from models.sam3_rcnn import get_sam3_faster_rcnn
+    from models.sam3_DETR import get_sam3_detr
     from data.transforms import get_train_transforms, get_valid_transforms
 except ImportError as e:
     print(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
@@ -144,16 +151,49 @@ for epoch in range(start_epoch, num_epochs):
 
         # Mixed precision forward pass
         with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
-            # Forward pass returns dictionary of losses
-            loss_dict = model(images, targets)
-            losses = sum(loss for loss in loss_dict.values())  # Sum all losses
+            if args.model == 'sam3_detr':
+                # 1. Stack List[Tensor] -> Tensor (B, C, H, W)
+                pixel_values = torch.stack(images) 
+                
+                # 2. Rename 'labels' to 'class_labels' for HF DETR
+                formatted_targets = []
+                for t in targets:
+                    formatted_targets.append({
+                        "class_labels": t["labels"], 
+                        "boxes": t["boxes"]
+                    })
+                
+                # 3. Forward pass with keyword args
+                outputs = model(pixel_values=pixel_values, labels=formatted_targets)
+                
+                # 4. Extract losses (HF returns an output object, not a plain dict)
+                losses = outputs.loss
+                loss_dict = outputs.loss_dict
+                
+            else:
+                # Forward pass returns dictionary of losses
+                loss_dict = model(images, targets)
+                losses = sum(loss for loss in loss_dict.values())  # Sum all losses
 
-        writer.add_scalar("Losses/total_train", losses, global_step)
-        writer.add_scalar("Losses/train_rpn_box_reg", loss_dict["loss_rpn_box_reg"], global_step)
-        writer.add_scalar("Losses/train_objectness", loss_dict["loss_objectness"], global_step)
-        writer.add_scalar("Losses/train_box_reg", loss_dict["loss_box_reg"], global_step)
-        writer.add_scalar("Losses/train_class", loss_dict["loss_classifier"], global_step)
+        # if args.model == 'sam3_rcnn':
+        #     writer.add_scalar("Losses/total_train", losses, global_step)
+        #     writer.add_scalar("Losses/train_rpn_box_reg", loss_dict["loss_rpn_box_reg"], global_step)
+        #     writer.add_scalar("Losses/train_objectness", loss_dict["loss_objectness"], global_step)
+        #     writer.add_scalar("Losses/train_box_reg", loss_dict["loss_box_reg"], global_step)
+        #     writer.add_scalar("Losses/train_class", loss_dict["loss_classifier"], global_step)
+        # else: 
+        #     writer.add_scalar("Losses/total_train", losses, global_step)
+        #     writer.add_scalar("Losses/train_bbox", loss_dict["loss_bbox"], global_step) # L1 loss for bounding boxes coordinates
+        #     writer.add_scalar("Losses/train_giou", loss_dict["loss_giou"], global_step) # GIoU loss for bounding boxes
+        #     writer.add_scalar("Losses/train_cardinality", loss_dict["loss_cardinality"], global_step) # cardinality loss for class prediction 
+        #     writer.add_scalar("Losses/train_ce", loss_dict["loss_ce"], global_step) # negative log likelihood for class prediction 
         
+        writer.add_scalar("Losses/total_train", losses, global_step)
+        
+        # Safe logging for keys that might not exist in both models
+        for k, v in loss_dict.items():
+            writer.add_scalar(f"Losses/train_{k}", v, global_step)
+
         # Mixed precision backward pass
         scaler.scale(losses).backward()
         scaler.step(optimizer)
