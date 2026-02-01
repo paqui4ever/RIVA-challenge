@@ -9,6 +9,22 @@ from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 
+import wandb
+
+# New wandb run
+run = wandb.init(
+    entity="spicard12-universidad-de-buenos-aires",
+    project="RIVA-challenge",
+    config={
+        "learning_rate": 1e-3,
+        "weight_decay": 1e-4,
+        "architecture": "SAM3 + DETR",
+        "dataset": "RIVA",
+        "epochs": 100,
+        "batch_size": 32,
+    },
+)
+
 # Parser for choosing the model
 parser = argparse.ArgumentParser(description="Train SAM3 Faster R-CNN")
 parser.add_argument(
@@ -32,17 +48,17 @@ RESUME_CHECKPOINT = None  # Set to checkpoint path to resume training, e.g., './
 USE_AMP = True  # Set to False to disable mixed precision
 
 # Paths
-# CSV_PATH_TRAIN = 'RIVA/annotations/annotations/train.csv'
-# CSV_PATH_VAL = 'RIVA/annotations/annotations/val.csv'
-# TRAIN_PATH = 'RIVA/images/images/train'
-# VAL_PATH = 'RIVA/images/images/val'
-# TEST_PATH = 'RIVA/images/images/test'
+CSV_PATH_TRAIN = 'RIVA/annotations/annotations/train.csv'
+CSV_PATH_VAL = 'RIVA/annotations/annotations/val.csv'
+TRAIN_PATH = 'RIVA/images/images/train'
+VAL_PATH = 'RIVA/images/images/val'
+TEST_PATH = 'RIVA/images/images/test'
 
-CSV_PATH_TRAIN = '/local_data/RIVA/annotations/annotations/train.csv'
-CSV_PATH_VAL = '/local_data/RIVA/annotations/annotations/val.csv'
-TRAIN_PATH = '/local_data/RIVA/images/images/train'
-VAL_PATH = '/local_data/RIVA/images/images/val'
-TEST_PATH = '/local_data/RIVA/images/images/test'
+# CSV_PATH_TRAIN = '/local_data/RIVA/annotations/annotations/train.csv'
+# CSV_PATH_VAL = '/local_data/RIVA/annotations/annotations/val.csv'
+# TRAIN_PATH = '/local_data/RIVA/images/images/train'
+# VAL_PATH = '/local_data/RIVA/images/images/val'
+# TEST_PATH = '/local_data/RIVA/images/images/test'
 
 # Imports from other libraries
 try:
@@ -189,11 +205,14 @@ for epoch in range(start_epoch, num_epochs):
         #     writer.add_scalar("Losses/train_cardinality", loss_dict["loss_cardinality"], global_step) # cardinality loss for class prediction 
         #     writer.add_scalar("Losses/train_ce", loss_dict["loss_ce"], global_step) # negative log likelihood for class prediction 
         
-        writer.add_scalar("Losses/total_train", losses, global_step)
+        # writer.add_scalar("Losses/total_train", losses, global_step)
         
         # Safe logging for keys that might not exist in both models
+        # for k, v in loss_dict.items():
+        #     writer.add_scalar(f"Losses/train_{k}", v, global_step)
+
         for k, v in loss_dict.items():
-            writer.add_scalar(f"Losses/train_{k}", v, global_step)
+            run.log({f"train_{k}": v, "epoch": epoch})
 
         # Mixed precision backward pass
         scaler.scale(losses).backward()
@@ -209,6 +228,7 @@ for epoch in range(start_epoch, num_epochs):
         global_step += 1
 
     writer.add_scalar("LearningRate", scheduler.get_last_lr()[0], epoch)
+    run.log({"LearningRate": scheduler.get_last_lr()[0], "epoch": epoch})
 
     avg_loss = total_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
@@ -240,7 +260,8 @@ for epoch in range(start_epoch, num_epochs):
     current_map = results['map'].item()
     writer.add_scalar("Validation/mAP_50_95", results['map'], epoch)
     writer.add_scalar("Validation/mAP_50", results['map_50'], epoch)
-    
+    run.log({"Validation/mAP_50_95": results['map'], "Validation/mAP_50": results['map_50'], "epoch": epoch})
+
     print(f"Validation Results - mAP (0.50:0.95): {current_map:.4f}")
 
     # --- CHECKPOINTING ---
