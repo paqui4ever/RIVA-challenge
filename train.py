@@ -108,7 +108,8 @@ optimizer = AdamW(params, lr=1e-3, weight_decay=1e-4)
 
 # 6. LEARNING RATE SCHEDULER
 num_epochs = 100
-scheduler = CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-6)
+total_steps = num_epochs * len(train_loader)
+scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
 # 7. MIXED PRECISION SCALER
 scaler = GradScaler(enabled=USE_AMP)
@@ -199,13 +200,14 @@ for epoch in range(start_epoch, num_epochs):
         scaler.step(optimizer)
         scaler.update()
 
+        # Step the scheduler after each optimization step
+        scheduler.step()
+
         total_loss += losses.item()
         pbar.set_postfix({'loss': f"{losses.item():.4f}"})
 
         global_step += 1
 
-    # Step the scheduler after each epoch
-    scheduler.step()
     writer.add_scalar("LearningRate", scheduler.get_last_lr()[0], epoch)
 
     avg_loss = total_loss / len(train_loader)
