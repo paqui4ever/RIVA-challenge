@@ -104,10 +104,10 @@ model.to(device)
 # 5. OPTIMIZER
 # Filter parameters requiring gradients (SAM3 backbone is frozen by default)
 params = [p for p in model.parameters() if p.requires_grad]
-optimizer = AdamW(params, lr=1e-3, weight_decay=1e-4)
+optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 
 # 6. LEARNING RATE SCHEDULER
-num_epochs = 100
+num_epochs = 1000
 total_steps = num_epochs * len(train_loader)
 scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
