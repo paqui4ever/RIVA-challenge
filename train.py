@@ -225,8 +225,47 @@ for epoch in range(start_epoch, num_epochs):
             
             # Mixed precision inference
             with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
-                # Forward pass in eval mode returns detections (list of dicts)
-                outputs = model(images)
+                if args.model == 'sam3_detr':
+                    # Stack images for DETR
+                    pixel_values = torch.stack(images)
+                    detr_outputs = model(pixel_values=pixel_values)
+
+                    # Convert DETR outputs to torchmetrics format
+                    # DETR outputs: logits (B, num_queries, num_classes+1), pred_boxes (B, num_queries, 4) in cxcywh normalized
+                    outputs = []
+                    for b in range(pixel_values.shape[0]):
+                        # Get predictions for this image
+                        logits = detr_outputs.logits[b]  # (num_queries, num_classes+1)
+                        pred_boxes = detr_outputs.pred_boxes[b]  # (num_queries, 4) in cxcywh normalized
+
+                        # Get class predictions (exclude no-object class which is last)
+                        probs = logits.softmax(-1)
+                        scores, labels = probs[:, :-1].max(-1)  # Exclude last class (no-object)
+
+                        # Filter out low confidence predictions (threshold can be adjusted)
+                        keep = scores > 0.5
+                        scores = scores[keep]
+                        labels = labels[keep]
+                        boxes_cxcywh = pred_boxes[keep]
+
+                        # Convert from cxcywh normalized to xyxy absolute
+                        img_h, img_w = pixel_values.shape[-2:]
+                        cx, cy, w, h = boxes_cxcywh.unbind(-1)
+                        boxes_xyxy = torch.stack([
+                            (cx - 0.5 * w) * img_w,
+                            (cy - 0.5 * h) * img_h,
+                            (cx + 0.5 * w) * img_w,
+                            (cy + 0.5 * h) * img_h
+                        ], dim=-1)
+
+                        outputs.append({
+                            'boxes': boxes_xyxy,
+                            'scores': scores,
+                            'labels': labels
+                        })
+                else:
+                    # Forward pass in eval mode returns detections (list of dicts)
+                    outputs = model(images)
 
             # Send to metric. Both outputs and targets are lists of dicts.
             # Outputs on device, targets on device - metric handles it.

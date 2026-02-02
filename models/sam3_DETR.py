@@ -93,13 +93,13 @@ class DetrBackboneAdapter(nn.Module):
     def forward(self, pixel_values, pixel_mask=None):
         # 1. Get raw features from the pure backbone
         # We resize to 1008x1008 to ensure stability, as 1024 causes rotary embedding mismatches.
-        if pixel_values.shape[-2:] != (1008, 1008):
-            pixel_values = torch.nn.functional.interpolate(
-                pixel_values, 
-                size=(1008, 1008), 
-                mode='bilinear', 
-                align_corners=False
-            )
+        # if pixel_values.shape[-2:] != (1008, 1008):
+        #     pixel_values = torch.nn.functional.interpolate(
+        #         pixel_values,
+        #         size=(1008, 1008),
+        #         mode='bilinear',
+        #         align_corners=False
+        #     )
             
         features_dict = self.backbone(pixel_values)
         
