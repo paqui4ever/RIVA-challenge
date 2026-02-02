@@ -26,7 +26,8 @@ def sam3_detr_model():
 def test_backbone_contract(sam3_detr_model):
     """
     Verifies the backbone returns the specific tuple structure DETR expects:
-    ([features], [masks])
+    ([(feature_map, mask), ...], position_embeddings)
+    HF DETR unpacks as: feature_map, mask = features[-1]
     """
     dummy_input = torch.randn(1, 3, 1008, 1008)
     
@@ -34,19 +35,26 @@ def test_backbone_contract(sam3_detr_model):
         # Access the wrapper directly
         outputs = sam3_detr_model.model.backbone(dummy_input)
     
-    # 1. Structure Check: Must be a list of length 1 (Conv Encoder only returns features)
+    # 1. Structure Check: Must be a tuple of (features_list, position_embeddings)
     assert isinstance(outputs, (tuple, list))
-    assert len(outputs) == 2, "Backbone must return ([features], [masks])"
-    
-    features_list, masks_list = outputs
-    
-    # 2. Content Check
-    assert len(features_list) == 1
-    assert len(masks_list) == 1
-    
-    features = features_list[0]
-    masks = masks_list[0]
-    
+    assert len(outputs) == 2, "Backbone must return (features_list, position_embeddings)"
+
+    features_list, position_embeddings = outputs
+
+    # 2. Content Check - features_list should be a list of (feature, mask) tuples
+    assert len(features_list) == 1, "Should have one feature level"
+
+    # Position embeddings should also be a list
+    assert position_embeddings is not None, "Position embeddings should not be None"
+    assert len(position_embeddings) == 1, "Should have one position embedding level"
+
+    # Each element in features_list should be a tuple (feature_map, mask)
+    feature_tuple = features_list[0]
+    assert isinstance(feature_tuple, tuple), "Each feature should be a (feature_map, mask) tuple"
+    assert len(feature_tuple) == 2, "Tuple should have (feature_map, mask)"
+
+    features, masks = feature_tuple
+
     # 3. Shape Check
     f_shape = features.shape
     print(f"Debug: Feature shape: {f_shape}")
@@ -60,11 +68,11 @@ def test_backbone_contract(sam3_detr_model):
 
 def test_projection_integrity(sam3_detr_model):
     """
-    Verifies that the 'input_proj' layer connects the backbone to the transformer correctly.
+    Verifies that the 'input_projection' layer connects the backbone to the transformer correctly.
     """
     backbone_channels = sam3_detr_model.model.backbone.out_channels
-    projector = sam3_detr_model.model.input_proj
-    
+    projector = sam3_detr_model.model.input_projection
+
     # Check 1: Input channels of conv1x1 must match backbone output
     assert projector.in_channels == backbone_channels, \
         f"Mismatch! Projector expects {projector.in_channels}, backbone gives {backbone_channels}"
