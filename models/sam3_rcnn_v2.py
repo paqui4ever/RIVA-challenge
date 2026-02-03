@@ -174,6 +174,12 @@ def build_sam3_fasterrcnn(
         image_mean=backbone.image_mean,
         image_std=backbone.image_std,
     )
+
+    # CRITICAL: FasterRCNN defaults to size_divisible=32.
+    # This causes padding to 1024, resulting in 73x73 patches, mismatching 72x72 embeddings.
+    # SAM3 uses patch_size=14, so we need size_divisible=14 (or 1 to disable padding entirely).
+    model.transform.size_divisible = 14
+
     return model
 
 
