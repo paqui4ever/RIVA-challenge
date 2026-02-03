@@ -14,9 +14,14 @@ parser = argparse.ArgumentParser(description="Train SAM3 Faster R-CNN")
 parser.add_argument(
     "--model", 
     type=str, 
-    choices=['sam3_rcnn', 'sam3_detr'],
+    choices=['sam3_rcnn', 'sam3_rcnn_v2', 'sam3_detr'],
     required=True,  # Make the flag mandatory
-    help="The model architecture to use (e.g., sam3_detr)"
+    help="The model architecture to use (sam3_rcnn, sam3_rcnn_v2, or sam3_detr)"
+)
+parser.add_argument(
+    "--trainable_backbone",
+    action="store_true",
+    help="If set, unfreeze backbone for sam3_rcnn_v2 (fine-tuning)"
 )
 args = parser.parse_args()
 
@@ -49,6 +54,7 @@ try:
     from data.dataset import BethesdaDataset
     from models.sam3_rcnn import get_sam3_faster_rcnn
     from models.sam3_DETR import get_sam3_detr
+    from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from data.transforms import get_train_transforms, get_valid_transforms
 except ImportError as e:
     print(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
@@ -95,6 +101,14 @@ num_classes = 9 # 8 classes + background
 if args.model == 'sam3_rcnn':
     print("Loading FasterRCNN with SAM3 backbone...")
     model = get_sam3_faster_rcnn(num_classes=num_classes)
+elif args.model == 'sam3_rcnn_v2':
+    print("Loading FasterRCNN with SAM3 Cut-B backbone (FPN multi-scale)...")
+    model = build_sam3_fasterrcnn(
+        model_name_or_path="facebook/sam3",
+        num_classes_closed_set=num_classes - 1,  # v2 adds +1 internally for background
+        trainable_backbone=args.trainable_backbone
+    )
+    print(f"  Backbone trainable: {args.trainable_backbone}")
 elif args.model == 'sam3_detr':
     print("Loading DETR with SAM3 backbone...")
     model = get_sam3_detr(num_classes=num_classes)
@@ -148,6 +162,20 @@ for epoch in range(start_epoch, num_epochs):
         images = list(image.to(device) for image in images)
         targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         
+        # Apply sam3_rcnn_v2-specific preprocessing (aspect-ratio preserving resize + pad)
+        if args.model == 'sam3_rcnn_v2':
+            target_size = model.backbone.target_size  # 1008 by default
+            processed_images = []
+            processed_targets = []
+            for img, tgt in zip(images, targets):
+                img, tgt, _ = sam3_resize_longest_side_and_pad_square(
+                    img, tgt, target_size=target_size
+                )
+                processed_images.append(img)
+                processed_targets.append(tgt)
+            images = processed_images
+            targets = processed_targets
+
         optimizer.zero_grad()
 
         # Mixed precision forward pass
@@ -223,6 +251,20 @@ for epoch in range(start_epoch, num_epochs):
             images = list(image.to(device) for image in images)
             targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
             
+            # Apply sam3_rcnn_v2-specific preprocessing (aspect-ratio preserving resize + pad)
+            if args.model == 'sam3_rcnn_v2':
+                target_size = model.backbone.target_size  # 1008 by default
+                processed_images = []
+                processed_targets = []
+                for img, tgt in zip(images, targets):
+                    img, tgt, _ = sam3_resize_longest_side_and_pad_square(
+                        img, tgt, target_size=target_size
+                    )
+                    processed_images.append(img)
+                    processed_targets.append(tgt)
+                images = processed_images
+                targets = processed_targets
+
             # Mixed precision inference
             with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
                 if args.model == 'sam3_detr':
