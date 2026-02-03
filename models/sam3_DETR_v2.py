@@ -225,38 +225,33 @@ class Sam3ForClosedSetDetection(nn.Module):
             for p in self.sam3.parameters():
                 p.requires_grad = False
 
-    def forward(
-        self,
-        pixel_values: Tensor,
-        targets: Optional[List[Dict[str, Tensor]]] = None,
-        **sam3_kwargs,
-    ):
+    def forward(self, pixel_values, input_ids=None, attention_mask=None, targets=None, **sam3_kwargs):
         """
         pixel_values: (B, 3, 1008, 1008) from Sam3Processor
         targets: list of dicts with normalized xyxy boxes in [0,1] and labels in [0..C-1]
         """
         outputs = self.sam3(
             pixel_values=pixel_values,
-            output_hidden_states=True,  # needed for decoder_hidden_states
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
             return_dict=True,
             **sam3_kwargs,
         )
 
-        # Query features from last decoder layer
-        # outputs.decoder_hidden_states: tuple[L] of (B, Q, hidden_size)
         dec_last = outputs.decoder_hidden_states[-1]
+        boxes = outputs.pred_boxes.clamp(0, 1)
 
-        logits = self.class_embed(dec_last)  # (B, Q, C+1)
+        # Align query counts: decoder may have extra queries (e.g., text query)
+        # Slice decoder hidden states to match the number of predicted boxes
+        num_boxes = boxes.shape[1]
+        dec_last = dec_last[:, :num_boxes, :]
 
-        # SAM3 provides pred_boxes already in xyxy (per HF docs).
-        # We assume normalized [0,1] (common for transformer detectors); clamp for safety.
-        boxes = box_xyxy_clamp(outputs.pred_boxes)  # (B, Q, 4)
+        logits = self.class_embed(dec_last)
 
-        out = {"logits": logits, "boxes": boxes, "sam3_outputs": outputs}
-
+        out = {"logits": logits, "boxes": boxes}
         if targets is not None:
             out["losses"] = self.criterion(logits, boxes, targets)
-
         return out
 
     def build_criterion(
@@ -283,6 +278,8 @@ class Sam3ForClosedSetDetection(nn.Module):
     def predict(
         self,
         pixel_values: Tensor,
+        input_ids: Optional[Tensor] = None,
+        attention_mask: Optional[Tensor] = None,
         orig_sizes: Optional[Tensor] = None,
         score_thresh: float = 0.3,
         max_detections: int = 100,
@@ -292,7 +289,7 @@ class Sam3ForClosedSetDetection(nn.Module):
         orig_sizes: (B, 2) as (H, W) from Sam3Processor's `original_sizes`.
         """
         self.eval()
-        out = self(pixel_values)
+        out = self(pixel_values, input_ids=input_ids, attention_mask=attention_mask)
         logits, boxes = out["logits"], out["boxes"]
 
         prob = logits.softmax(-1)                  # (B, Q, C+1)
@@ -327,34 +324,29 @@ class Sam3ForClosedSetDetection(nn.Module):
 # ----------------------------
 # Processor + collate_fn example
 # ----------------------------
-def make_sam3_collate_fn(processor: Sam3Processor):
-    """
-    Expects dataset to return: (PIL_or_np_image, target_dict)
-      target_dict:
-        - boxes: FloatTensor (N,4) absolute xyxy in original image pixels (1024x1024 in your case)
-        - labels: LongTensor  (N,) in [0..7]
-    """
+def make_sam3_collate_fn(processor, prompt="cells"):
     def collate(batch):
         images, targets = zip(*batch)
-        enc = processor(images=list(images), return_tensors="pt")
-        pixel_values = enc["pixel_values"]  # (B,3,1008,1008) :contentReference[oaicite:4]{index=4}
-        orig_sizes = torch.tensor(enc["original_sizes"], dtype=torch.float32)  # (B,2) (H,W) :contentReference[oaicite:5]{index=5}
 
-        # Normalize boxes to [0,1] in xyxy using original image size.
-        # This stays consistent under uniform resize (1024 -> 1008).
+        texts = [prompt] * len(images)
+        enc = processor(images=list(images), text=texts, return_tensors="pt")
+
+        pixel_values = enc["pixel_values"]
+        input_ids = enc["input_ids"]
+        attention_mask = enc.get("attention_mask", None)
+
+        # avoid the warning: don't wrap a tensor with torch.tensor(...)
+        orig_sizes = enc["original_sizes"].to(torch.float32)
+
+        # normalize GT boxes in [0,1] using orig_sizes (H,W)
         norm_targets = []
         for t, (h, w) in zip(targets, orig_sizes):
             boxes = t["boxes"].clone().float()
             boxes[:, [0, 2]] /= w
             boxes[:, [1, 3]] /= h
-            boxes = box_xyxy_clamp(boxes)
-            norm_targets.append({
-                "labels": t["labels"].long(),
-                "boxes": boxes,
-            })
+            norm_targets.append({"labels": t["labels"].long(), "boxes": boxes})
 
-        return pixel_values, norm_targets, orig_sizes
-
+        return pixel_values, input_ids, attention_mask, norm_targets, orig_sizes
     return collate
 
 

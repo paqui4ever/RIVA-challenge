@@ -37,7 +37,7 @@ parser.add_argument(
 parser.add_argument(
     "--checkpoint_dir",
     type=str,
-    default='/local_data/RIVA/checkpoints_detr_v2',
+    default='/local_data/RIVA/checkpoints/detr_v2',
     help="Directory to save checkpoints"
 )
 parser.add_argument(
@@ -379,17 +379,16 @@ for epoch in range(start_epoch, num_epochs):
 
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}")
     for batch_idx, batch in enumerate(pbar):
-        pixel_values, targets, orig_sizes = batch
-
-        # Move to device
-        pixel_values = pixel_values.to(device)
-        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+        pixel_values, input_ids, attention_mask, targets, orig_sizes = batch
 
         optimizer.zero_grad()
 
         # Mixed precision forward pass
         with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
-            outputs = model(pixel_values=pixel_values, targets=targets)
+            outputs = model(pixel_values=pixel_values.to(device),
+                            input_ids=input_ids.to(device),
+                            attention_mask=None if attention_mask is None else attention_mask.to(device),
+                            targets=[{k: v.to(device) for k, v in t.items()} for t in targets])
             losses = outputs["losses"]
             loss = losses["loss_total"]
 
@@ -437,14 +436,18 @@ for epoch in range(start_epoch, num_epochs):
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
-            pixel_values, targets, orig_sizes = batch
+            pixel_values, input_ids, attention_mask, targets, orig_sizes = batch
             pixel_values = pixel_values.to(device)
+            input_ids = input_ids.to(device)
+            attention_mask = None if attention_mask is None else attention_mask.to(device)
             orig_sizes = orig_sizes.to(device)
 
             # Get predictions using the model's predict method
             with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
                 predictions = model.predict(
                     pixel_values,
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
                     orig_sizes=orig_sizes,
                     score_thresh=args.score_thresh,
                     max_detections=100
