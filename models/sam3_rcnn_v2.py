@@ -1,11 +1,9 @@
-import math
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import torchvision
 import torchvision.transforms.functional as TVF
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
@@ -140,7 +138,7 @@ class Sam3CutBBackbone(nn.Module):
 # -------------------------
 # Build Faster R-CNN with SAM3 Cut B backbone (8 classes => num_classes=9 incl background)
 # -------------------------
-def build_sam3_cutb_fasterrcnn(
+def build_sam3_fasterrcnn(
     model_name_or_path: str = "facebook/sam3",
     num_classes_closed_set: int = 8,
     trainable_backbone: bool = True,
@@ -184,7 +182,7 @@ def build_sam3_cutb_fasterrcnn(
 # -------------------------
 if __name__ == "__main__":
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = build_sam3_cutb_fasterrcnn("facebook/sam3", num_classes_closed_set=8, trainable_backbone=True).to(device)
+    model = build_sam3_fasterrcnn("facebook/sam3", num_classes_closed_set=8, trainable_backbone=True).to(device)
 
     # Dummy batch: list[Tensor] images + list[Dict] targets (torchvision detection convention)
     # Assume you load an image as float tensor [3,H,W] in [0,1] and boxes in xyxy pixel coords.
