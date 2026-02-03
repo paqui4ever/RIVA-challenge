@@ -76,6 +76,12 @@ parser.add_argument(
     default=0.3,
     help="Score threshold for inference during validation"
 )
+parser.add_argument(
+    "--gradient_accumulation_steps",
+    type=int,
+    default=1,
+    help="Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)"
+)
 args = parser.parse_args()
 
 # ----------------------------
@@ -331,7 +337,10 @@ else:
 # Learning Rate Scheduler
 # ----------------------------
 num_epochs = args.epochs
-total_steps = num_epochs * len(train_loader)
+# Account for gradient accumulation: scheduler steps only when optimizer steps
+num_batches_per_epoch = len(train_loader)
+optimizer_steps_per_epoch = (num_batches_per_epoch + args.gradient_accumulation_steps - 1) // args.gradient_accumulation_steps
+total_steps = num_epochs * optimizer_steps_per_epoch
 scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
 # ----------------------------
@@ -361,8 +370,13 @@ if args.resume and os.path.isfile(args.resume):
 # ----------------------------
 # Training Loop
 # ----------------------------
+ACCUM_STEPS = args.gradient_accumulation_steps
+EFFECTIVE_BATCH_SIZE = BATCH_SIZE * ACCUM_STEPS
+
 print(f"\nStarting Training for {num_epochs} epochs...")
 print(f"  Batch size: {BATCH_SIZE}")
+print(f"  Gradient accumulation steps: {ACCUM_STEPS}")
+print(f"  Effective batch size: {EFFECTIVE_BATCH_SIZE}")
 print(f"  LR backbone: {args.lr_backbone}")
 print(f"  LR head: {args.lr_head}")
 print(f"  Freeze SAM3: {args.freeze_sam3}")
@@ -381,8 +395,6 @@ for epoch in range(start_epoch, num_epochs):
     for batch_idx, batch in enumerate(pbar):
         pixel_values, input_ids, attention_mask, targets, orig_sizes = batch
 
-        optimizer.zero_grad()
-
         # Mixed precision forward pass
         with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
             outputs = model(pixel_values=pixel_values.to(device),
@@ -391,17 +403,23 @@ for epoch in range(start_epoch, num_epochs):
                             targets=[{k: v.to(device) for k, v in t.items()} for t in targets])
             losses = outputs["losses"]
             loss = losses["loss_total"]
+            # Normalize loss for gradient accumulation
+            loss = loss / ACCUM_STEPS
 
-        # Backward pass
+        # Backward pass (accumulate gradients)
         scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
 
-        # Step scheduler
-        scheduler.step()
+        # Only step optimizer every ACCUM_STEPS batches
+        if (batch_idx + 1) % ACCUM_STEPS == 0 or (batch_idx + 1) == len(train_loader):
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-        # Accumulate losses
-        total_loss += loss.item()
+            # Step scheduler after each optimizer step
+            scheduler.step()
+
+        # Accumulate losses (use original loss scale for logging)
+        total_loss += loss.item() * ACCUM_STEPS
         for k in epoch_losses:
             if k in losses:
                 epoch_losses[k] += losses[k].item()
