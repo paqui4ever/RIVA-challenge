@@ -20,9 +20,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformers import Sam3Processor
 
-from data.dataset import BethesdaDataset
-from data.transforms import get_train_transforms, get_valid_transforms
-from models.sam3_DETR_v2 import Sam3ForClosedSetDetection, make_sam3_collate_fn, box_xyxy_clamp
+from data.dataset import BethesdaDataset, filter_boxes_and_labels_pascal_voc
+from data.transforms import get_train_transforms_DETR, get_valid_transforms_DETR
+from models.sam3_DETR_v2 import Sam3ForClosedSetDetection
 
 
 # ----------------------------
@@ -113,16 +113,17 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 # ----------------------------
-# Dataset Wrapper for Sam3Processor
+# Dataset Wrapper for Sam3 DETR with Albumentations
 # ----------------------------
-class BethesdaDatasetForSam3(BethesdaDataset):
+class BethesdaDatasetForSam3DETR(BethesdaDataset):
     """
-    Wrapper that returns PIL images instead of tensors.
-    The Sam3Processor will handle the preprocessing.
+    Dataset that uses albumentations transforms for augmentation and normalization.
+    Returns pre-processed tensors (already normalized with SAM3 mean/std).
     """
-    def __init__(self, csv_file, root_dir):
-        # Initialize without transforms - Sam3Processor handles preprocessing
+    def __init__(self, csv_file, root_dir, transforms):
+        # Initialize with transforms - we handle preprocessing ourselves
         super().__init__(csv_file, root_dir, transforms=None)
+        self.albu_transforms = transforms
 
     def __getitem__(self, idx):
         from PIL import Image
@@ -133,8 +134,9 @@ class BethesdaDatasetForSam3(BethesdaDataset):
 
         image_path = os.path.join(self.root_dir, image_id)
         image = Image.open(image_path).convert('RGB')
+        image_np = np.array(image)
 
-        W, H = image.size  # PIL gives (W, H)
+        H, W, _ = image_np.shape  # numpy gives (H, W, C)
 
         boxes = []
         labels = []
@@ -161,87 +163,17 @@ class BethesdaDatasetForSam3(BethesdaDataset):
             boxes.append([x_min, y_min, x_max, y_max])
             labels.append(class_id)
 
-        if len(boxes) > 0:
-            boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
-        else:
-            boxes = torch.zeros((0, 4), dtype=torch.float32)
-            labels = torch.zeros((0,), dtype=torch.int64)
+        # Apply albumentations transforms (includes augmentation, resize, normalization)
+        transformed = self.albu_transforms(image=image_np, bboxes=boxes, labels=labels)
 
-        target = {
-            "boxes": boxes,
-            "labels": labels,
-        }
+        # Filter bboxes after augmentation (removes weird aspect ratios and small boxes)
+        bboxes_f, labels_f = filter_boxes_and_labels_pascal_voc(
+            transformed["bboxes"], transformed["labels"], min_side=32.0, max_ar=3.0
+        )
 
-        return image, target
-
-
-# ----------------------------
-# Training Dataset with Augmentation
-# ----------------------------
-class BethesdaDatasetForSam3WithAug(BethesdaDataset):
-    """
-    Wrapper that applies augmentations and returns PIL images.
-    Augmentations are applied via albumentations, then converted back.
-    """
-    def __init__(self, csv_file, root_dir, augment=True):
-        super().__init__(csv_file, root_dir, transforms=None)
-        self.augment = augment
-        if augment:
-            import albumentations as A
-            self.aug_transforms = A.Compose([
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.5),
-                A.RandomRotate90(p=0.5),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.3),
-            ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
-
-    def __getitem__(self, idx):
-        from PIL import Image
-        import numpy as np
-
-        image_id = self.image_ids[idx]
-        records = self.df[self.df['image_filename'] == image_id]
-
-        image_path = os.path.join(self.root_dir, image_id)
-        image = Image.open(image_path).convert('RGB')
-        image_np = np.array(image)
-
-        H, W, _ = image_np.shape
-
-        boxes = []
-        labels = []
-
-        for _, row in records.iterrows():
-            x_center, y_center = row['x'], row['y']
-            width, height = row['width'], row['height']
-            class_id = row['class']  # 0-indexed
-
-            x_min = x_center - (width / 2)
-            y_min = y_center - (height / 2)
-            x_max = x_center + (width / 2)
-            y_max = y_center + (height / 2)
-
-            x_min = max(0, min(x_min, W))
-            y_min = max(0, min(y_min, H))
-            x_max = max(0, min(x_max, W))
-            y_max = max(0, min(y_max, H))
-
-            if (x_max <= x_min) or (y_max <= y_min):
-                continue
-
-            boxes.append([x_min, y_min, x_max, y_max])
-            labels.append(class_id)
-
-        # Apply augmentations
-        if self.augment and len(boxes) > 0:
-            transformed = self.aug_transforms(image=image_np, bboxes=boxes, labels=labels)
-            image_np = transformed['image']
-            boxes = list(transformed['bboxes'])
-            labels = list(transformed['labels'])
-
-        # Convert back to PIL for Sam3Processor
-        image = Image.fromarray(image_np)
+        image_tensor = transformed['image']  # Already a tensor, normalized
+        boxes = bboxes_f
+        labels = labels_f
 
         if len(boxes) > 0:
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
@@ -253,31 +185,90 @@ class BethesdaDatasetForSam3WithAug(BethesdaDataset):
         target = {
             "boxes": boxes,
             "labels": labels,
+            "orig_size": torch.tensor([H, W], dtype=torch.float32),  # Store original size for normalization
         }
 
-        return image, target
+        return image_tensor, target
 
+
+# ----------------------------
+# Custom collate function for pre-processed tensors
+# ----------------------------
+def make_detr_collate_fn(processor, target_size: int = 1008):
+    """
+    Collate function for datasets that return pre-processed tensors.
+    Images are already normalized by albumentations, so we skip processor normalization.
+    """
+    def collate(batch):
+        images, targets = zip(*batch)
+
+        # Stack images (already tensors from albumentations ToTensorV2)
+        pixel_values = torch.stack(images, dim=0)
+
+        # Get original sizes and normalize boxes
+        orig_sizes = []
+        norm_targets = []
+
+        for t in targets:
+            orig_h, orig_w = t["orig_size"].tolist()
+            orig_sizes.append([orig_h, orig_w])
+
+            # Normalize boxes: they are in resized coordinates (target_size x target_size)
+            # Convert to [0, 1] range
+            boxes = t["boxes"].clone().float()
+            if boxes.numel() > 0:
+                boxes[:, [0, 2]] /= target_size  # x coords
+                boxes[:, [1, 3]] /= target_size  # y coords
+
+            norm_targets.append({
+                "labels": t["labels"].long(),
+                "boxes": boxes,
+            })
+
+        orig_sizes = torch.tensor(orig_sizes, dtype=torch.float32)
+
+        # Generate dummy input_ids for SAM3 (text prompt)
+        # We use a simple prompt for detection
+        texts = ["cells"] * len(images)
+        text_enc = processor.tokenizer(texts, return_tensors="pt", padding=True)
+        input_ids = text_enc["input_ids"]
+        attention_mask = text_enc.get("attention_mask", None)
+
+        return pixel_values, input_ids, attention_mask, norm_targets, orig_sizes
+
+    return collate
+
+
+# ----------------------------
+# Initialize Sam3Processor and Transforms
+# ----------------------------
+print("Loading Sam3Processor...")
+processor = Sam3Processor.from_pretrained(SAM3_CHECKPOINT)
+
+# Create transforms with normalization using SAM3's mean/std
+TARGET_SIZE = 1008
+train_transforms = get_train_transforms_DETR(processor, size=TARGET_SIZE)
+val_transforms = get_valid_transforms_DETR(processor, size=TARGET_SIZE)
 
 # ----------------------------
 # Initialize Datasets
 # ----------------------------
 print("Initializing Datasets for Sam3ForClosedSetDetection...")
-train_ds = BethesdaDatasetForSam3WithAug(
+train_ds = BethesdaDatasetForSam3DETR(
     csv_file=CSV_PATH_TRAIN,
     root_dir=TRAIN_PATH,
-    augment=True
+    transforms=train_transforms
 )
-val_ds = BethesdaDatasetForSam3(
+val_ds = BethesdaDatasetForSam3DETR(
     csv_file=CSV_PATH_VAL,
-    root_dir=VAL_PATH
+    root_dir=VAL_PATH,
+    transforms=val_transforms
 )
 
 # ----------------------------
-# Initialize Sam3Processor and DataLoaders
+# Initialize DataLoaders
 # ----------------------------
-print("Loading Sam3Processor...")
-processor = Sam3Processor.from_pretrained(SAM3_CHECKPOINT)
-collate_fn = make_sam3_collate_fn(processor)
+collate_fn = make_detr_collate_fn(processor, target_size=TARGET_SIZE)
 
 BATCH_SIZE = args.batch_size
 
