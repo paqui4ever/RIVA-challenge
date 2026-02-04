@@ -94,6 +94,50 @@ def get_train_transforms_RCNN(size: int = 1008):
             A.HorizontalFlip(p=0.5),
             A.VerticalFlip(p=0.5),
             A.RandomRotate90(p=0.5),
+
+            A.Affine(
+                scale=(0.92, 1.08),
+                translate_percent=(-0.03, 0.03),
+                rotate=(-8, 8),
+                shear=(-5, 5),
+                fit_output=False,
+                p=0.6,
+            ),
+
+            A.OneOf(
+                [
+                    A.ColorJitter(brightness=0.20, contrast=0.20, saturation=0.20, hue=0.08),
+                    A.RandomBrightnessContrast(brightness_limit=0.20, contrast_limit=0.20),
+                    A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=18, val_shift_limit=12),
+                    A.RandomGamma(gamma_limit=(85, 115)),
+                ],
+                p=0.6,
+            ),
+
+            noise,
+            A.OneOf(
+                [
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0),
+                ],
+                p=0.20,
+            ),
+
+            dropout,
+
+            A.ToFloat(max_value=255.0),
+            ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="pascal_voc",
+            label_fields=["labels"],
+            clip=True,
+            min_visibility=0.15,
+            min_area=64,
+        ),
+    )
+
+
 def get_train_transforms_v3():
     """
     Returns transformations for the training set (v3).
@@ -105,8 +149,25 @@ def get_train_transforms_v3():
     - Dropout: ChannelDropout
     - Cutout: CoarseDropout (proxy for CutMix/Mosaic)
     """
-    return A.Compose([
-        A.Resize(height=1008, width=1008),
+    noise = A.OneOf(
+        [
+            A.GaussNoise(std_range=(0.01, 0.05), p=1.0),
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+        ],
+        p=0.25,
+    )
+
+    dropout = A.CoarseDropout(
+        num_holes_range=(1, 8),
+        hole_height_range=(10, 28),
+        hole_width_range=(10, 28),
+        fill=0,
+        p=0.1,
+    )
+
+    return A.Compose(
+        [
+            A.Resize(height=1008, width=1008),
 
             # Mild affine to avoid clipped slivers
             A.Affine(
@@ -115,7 +176,7 @@ def get_train_transforms_v3():
                 rotate=(-8, 8),
                 shear=(-5, 5),
                 fit_output=False,
-                p=0.6
+                p=0.6,
             ),
 
             A.OneOf(
@@ -125,20 +186,22 @@ def get_train_transforms_v3():
                     A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=18, val_shift_limit=12),
                     A.RandomGamma(gamma_limit=(85, 115)),
                 ],
-                p=0.6
+                p=0.6,
             ),
 
             noise,
             A.OneOf(
-                [A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-                 A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0)],
-                p=0.20
+                [
+                    A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                    A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0),
+                ],
+                p=0.20,
             ),
 
             dropout,
 
             A.ToFloat(max_value=255.0),
-            ToTensorV2()
+            ToTensorV2(),
         ],
         bbox_params=A.BboxParams(
             format="pascal_voc",
