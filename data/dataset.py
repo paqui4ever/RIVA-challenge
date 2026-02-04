@@ -88,7 +88,7 @@ class BethesdaDataset(Dataset):
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
 
             bboxes_f, labels_f = filter_boxes_and_labels_pascal_voc(
-                transformed["bboxes"], transformed["labels"], min_side=20.0, max_ar=3.0
+                transformed["bboxes"], transformed["labels"], min_side=32.0, max_ar=3.0
             )
 
             image = transformed['image']

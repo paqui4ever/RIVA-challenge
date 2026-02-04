@@ -111,7 +111,7 @@ def get_train_transforms_v3():
             # Mild affine to avoid clipped slivers
             A.Affine(
                 scale=(0.92, 1.08),
-                translate_percent=(-0.02, 0.02),
+                translate_percent=(-0.03, 0.03),
                 rotate=(-8, 8),
                 shear=(-5, 5),
                 fit_output=False,
