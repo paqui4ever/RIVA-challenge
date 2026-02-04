@@ -24,7 +24,7 @@ def cell_dino_model():
     # However, we test the logic.
     try:
         model = build_cell_dino_fasterrcnn(
-            model_name="dinov2_vits14", # Use small model for test speed/memory
+            model_name="cell_dino_hpa_vitl14", # Use small model for test speed/memory
             #pretrained_checkpoint_path="C:/Users/srene/Computer Vision/RIVA-challenge/weights/cell_dino_vitl14_pretrain_hpa_fov_highres-f57e7934.pth",
             num_classes_closed_set=8,
             trainable_backbone=False,
@@ -116,7 +116,7 @@ def test_load_checkpoint_path(tmp_path):
     # We use a mocked torch.load or just verify it runs without crashing given strict=False
     try:
         model = build_cell_dino_fasterrcnn(
-            model_name="dinov2_vits14",
+            model_name="cell_dino_hpa_vitl14",
             pretrained_checkpoint_path=str(chk_path),
             trainable_backbone=False
         )
