@@ -14,6 +14,8 @@ The first model architecture that we proposed consisted of using [SAM3](https://
 
 The second model architecture, and the current one, also uses SAM3's vision encoder but this time as a backbone of [DETR](https://arxiv.org/pdf/2005.12872). This version of the model is much newer and takes advantage of the current Transfomer based architectures. 
 
+The third model architecture, and the one we will begin experimenting with, uses [Cell-DINO](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1013828) as a backbone of Faster-RCNN. This model will potentially profit from the pretraining of the backbone on cell images, leading to a stronger performance on the RIVA dataset.
+
 ## 🚀 Quick start
 Start by downloading the projects dependencies by running
 ```cli
@@ -34,11 +36,48 @@ python train.py --model <MODEL_NAME>
 The only valid model names are: 
 - **sam3_rcnn** for the SAM3 + Faster-RCNN 
 - **sam3_detr** for the SAM3 + DETR
+- **sam3_rcnn_v2** for the *revisited* SAM3 + Faster-RCNN
+
+We also have two other specific training loops: one for the *revisited* SAM3 + DETR and one for the Cell-DINO + Faster-RCNN model.
+
+To train the revisited SAM3 + DETR run:
+```cli
+python train_sam3_detr_v2.py
+```
+For tuning the hyperparameters, the training script takes the following arguments:
+- `--freeze_sam3`: If set, freeze the SAM3 backbone (only train the classification head)
+- `--checkpoint_dir`: Directory to save checkpoints
+- `--resume`: Path to checkpoint to resume training from
+- `--batch_size`: Batch size for training (default: 8, adjust based on GPU memory)
+- `--epochs`: Number of training epochs
+- `--lr_backbone`: Learning rate for SAM3 backbone
+- `--lr_head`: Learning rate for classification head
+- `--score_thresh`: Score threshold for inference during validation
+- `--gradient_accumulation_steps`: Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)
+
+Before training the Cell-DINO model, you must create a .env on the root directory with the following format:
+```txt
+CELL_DINO_WEIGHTS_URL=<WEIGHTS_URL>
+DEBUG=TRUE
+```
+> Ensure you have python-dotenv installed!
+
+To obtain the weights url complete the requested information in the following link: https://ai.meta.com/resources/models-and-libraries/cell-dino-downloads/.
+After that, you should receive an email with the url's to the weights. The one to use is
+**cell_dino_vitl14_pretrain_hpa_fov_highres-*.pth**
+
+The training script for Cell-DINO + Faster-RCNN is much simpler. It can be run with:
+```cli
+python train_cell_dino.py
+```
+And it only has the following arguments:
+- `--pretrained_checkpoint_path`: Path to Cell-DINO high-res weights (.pth file). Optional if loading from URL.
+- `--trainable_backbone`: If set, unfreeze backbone (fine-tuning). Default is Frozen.
 
 ## 📖 Testing
 To run the functionality tests run:
-```cli
-pytest tests/
+```
+python tests/
 ```
 
 ## 📁 Generating predictions
@@ -82,5 +121,12 @@ If you use this code in your research, please cite:
       archivePrefix={arXiv},
       primaryClass={cs.CV},
       url={https://arxiv.org/abs/2005.12872}, 
+}
+
+@misc{,
+  title={Cell-DINO: Self-Supervised Image-based Embeddings for Cell Fluorescent Microscopy},
+  author={Moutakanni, Th\'eo and Couprie, Camille and Yi, Seungeun and Gardes, Elouan Gardes and Bojanowski, Piotr and Touvron, Hugo and Doron, Michael and Chen, Zitong S. and Moshkov, Nikita and Caron, Mathilde and Joulin, Armand and Pernice, Wolfgang M. and Caicedo, Juan C.},
+  journal={in review to PloS One on Computational Biology},
+  year={2025}
 }
 ```
