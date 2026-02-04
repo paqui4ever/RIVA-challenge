@@ -16,6 +16,10 @@ The second model architecture, and the current one, also uses SAM3's vision enco
 
 The third model architecture, and the one we will begin experimenting with, uses [Cell-DINO](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1013828) as a backbone of Faster-RCNN. This model will potentially profit from the pretraining of the backbone on cell images, leading to a stronger performance on the RIVA dataset.
 
+Our latest improvement consists of using [LoRA](https://arxiv.org/pdf/2106.09685) finetuning on the Cell-DINO + Faster-RCNN and SAM3 + DETR models.
+
+> Training the LoRA models is currently not supported.
+
 ## 🚀 Quick start
 Start by downloading the projects dependencies by running
 ```cli
@@ -55,14 +59,7 @@ For tuning the hyperparameters, the training script takes the following argument
 - `--score_thresh`: Score threshold for inference during validation
 - `--gradient_accumulation_steps`: Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)
 
-Before training the Cell-DINO model, you must create a .env on the root directory with the following format:
-```txt
-CELL_DINO_WEIGHTS_URL=<WEIGHTS_URL>
-DEBUG=TRUE
-```
-> Ensure you have python-dotenv installed!
-
-To obtain the weights url complete the requested information in the following link: https://ai.meta.com/resources/models-and-libraries/cell-dino-downloads/.
+Before training the Cell-DINO model, you must obtain the pretrained weights by completing the requested information in the following link: https://ai.meta.com/resources/models-and-libraries/cell-dino-downloads/.
 After that, you should receive an email with the url's to the weights. The one to use is
 **cell_dino_vitl14_pretrain_hpa_fov_highres-*.pth**
 
@@ -73,6 +70,8 @@ python train_cell_dino.py
 And it only has the following arguments:
 - `--pretrained_checkpoint_path`: Path to Cell-DINO high-res weights (.pth file). Optional if loading from URL.
 - `--trainable_backbone`: If set, unfreeze backbone (fine-tuning). Default is Frozen.
+
+Provide the pretrained weights path to the script for easier use.
 
 ## 📖 Testing
 To run the functionality tests run:
@@ -87,6 +86,8 @@ To generate predictions over the test dataset run:
 python predict.py --model <MODEL_NAME>
 ```
 This will generate a submission.csv file in the "results/" directory.
+
+> Predictions for the revisited and LoRA models are currently not fully supported. The script must be revisited before they can be used.
 
 ##  📜 References
 
@@ -128,5 +129,15 @@ If you use this code in your research, please cite:
   author={Moutakanni, Th\'eo and Couprie, Camille and Yi, Seungeun and Gardes, Elouan Gardes and Bojanowski, Piotr and Touvron, Hugo and Doron, Michael and Chen, Zitong S. and Moshkov, Nikita and Caron, Mathilde and Joulin, Armand and Pernice, Wolfgang M. and Caicedo, Juan C.},
   journal={in review to PloS One on Computational Biology},
   year={2025}
+}
+
+@misc{hu2021loralowrankadaptationlarge,
+      title={LoRA: Low-Rank Adaptation of Large Language Models}, 
+      author={Edward J. Hu and Yelong Shen and Phillip Wallis and Zeyuan Allen-Zhu and Yuanzhi Li and Shean Wang and Lu Wang and Weizhu Chen},
+      year={2021},
+      eprint={2106.09685},
+      archivePrefix={arXiv},
+      primaryClass={cs.CL},
+      url={https://arxiv.org/abs/2106.09685}, 
 }
 ```
