@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 import os
-from dotenv import load_dotenv
+# from dotenv import load_dotenv
 
 import torch
 import torch.nn as nn
@@ -13,15 +13,16 @@ from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
+
 # -------------------------
 # Preprocess: Square resize + pad (aligned with DINOv2 patch size)
 # -------------------------
 
 # Read the .env for the weights url
-load_dotenv()
+# load_dotenv()
 
 # Get the weights url from the .env
-CELL_DINO_WEIGHTS_URL = os.environ.get('CELL_DINO_WEIGHTS_URL')
+# CELL_DINO_WEIGHTS_URL = os.environ.get('CELL_DINO_WEIGHTS_URL')
 
 @dataclass
 class CellDinoResizePadMeta:
@@ -100,33 +101,51 @@ class CellDinoBackbone(nn.Module):
     ):
         super().__init__()
         
-        # Load backbone from torch hub
-        # Fallback to 'dinov2_vitl14' if cell_dino specific name fails or isn't in default hub.
-        
-        # Note: We rely on 'facebookresearch/dinov2' hub. 
-        # 'cell_dino_hpa_vitl14' is the specific model that we are looking for.
-        # If not, we fall back to 'dinov2_vitl14' structure-wise.
-        
+        # Load backbone structure from torch hub (without weights first)
         try:
-            self.vision = torch.hub.load("facebookresearch/dinov2", model_name, source='local', pretrained_url=CELL_DINO_WEIGHTS_URL)
-        except Exception as e:
-            print(f"Warning: Could not load {model_name} from hub, falling back to 'dinov2_vitl14'. Error: {e}")
+            # We use the standard dinov2_vitl14 structure
             self.vision = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14", pretrained=False)
+        except Exception as e:
+            print(f"Error loading dinov2 from hub: {e}")
+            raise e
 
-        # if pretrained_checkpoint_path:
-        #     print(f"Loading Cell-DINO weights from {pretrained_checkpoint_path}...")
-        #     state_dict = torch.load(pretrained_checkpoint_path, map_location="cpu")
-        #     # Handle potential checkpoint key differences (e.g. 'teacher' prefix)
-        #     if "teacher" in state_dict:
-        #         state_dict = state_dict["teacher"]
-        #     # Remove potential prefixes if they don't match
-        #     clean_state_dict = {}
-        #     for k, v in state_dict.items():
-        #         k = k.replace("backbone.", "") # generic cleanup
-        #         clean_state_dict[k] = v
-            
-        #     missing, unexpected = self.vision.load_state_dict(clean_state_dict, strict=False)
-        #     print(f"Loaded weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+        if pretrained_checkpoint_path:
+            weights_path = pretrained_checkpoint_path
+        else:
+            # Load local weights default path
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            weights_path = os.path.join(project_root, "weights", "cell_dino_vitl14_pretrain_hpa_fov_highres-f57e7934.pth")
+        
+        if os.path.exists(weights_path):
+            print(f"Loading Cell-DINO weights from {weights_path}...")
+            try:
+                state_dict = torch.load(weights_path, map_location="cpu")
+                
+                if "teacher" in state_dict:
+                    state_dict = state_dict["teacher"]
+                if "state_dict" in state_dict:
+                     state_dict = state_dict["state_dict"]
+                     
+                clean_state_dict = {}
+                for k, v in state_dict.items():
+                    k = k.replace("backbone.", "") 
+                    
+                    # Handle 4-channel vs 3-channel mismatch for the first conv layer
+                    if k == "patch_embed.proj.weight":
+                        if v.shape[1] == 4 and self.vision.patch_embed.proj.weight.shape[1] == 3:
+                            print("Adapting 4-channel weights to 3-channel model (keeping first 3 channels)...")
+                            v = v[:, :3, :, :]
+                            
+                    clean_state_dict[k] = v
+                    
+                missing, unexpected = self.vision.load_state_dict(clean_state_dict, strict=False)
+                print(f"Loaded weights. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+            except Exception as e:
+                print(f"Error loading weights file {weights_path}: {e}")
+                # Don't crash if optional weights fail, unless critical? 
+                # For now let's allow it to continue with random weights but warn heavily
+        else:
+            print(f"WARNING: Weights file not found at {weights_path}. Initializing with random weights.")
 
         if not trainable:
             for p in self.vision.parameters():
