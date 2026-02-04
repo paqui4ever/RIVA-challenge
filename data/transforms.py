@@ -68,6 +68,32 @@ def get_train_transforms_v2():
         ToTensorV2()
     ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
 
+
+def get_train_transforms_RCNN(size: int = 1008):
+    # Version-robust noise/occlusion definitions
+    noise = A.OneOf(
+        [
+            A.GaussNoise(std_range=(0.01, 0.05), p=1.0),  # image assumed 0..255 before ToFloat
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+        ],
+        p=0.25
+    )
+
+    dropout = A.CoarseDropout(
+        num_holes_range=(1, 8),
+        hole_height_range=(10, 28),
+        hole_width_range=(10, 28),
+        fill=0,
+        p=0.1
+    )
+
+    return A.Compose(
+        [
+            A.Resize(size, size),
+
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
 def get_train_transforms_v3():
     """
     Returns transformations for the training set (v3).
@@ -82,40 +108,136 @@ def get_train_transforms_v3():
     return A.Compose([
         A.Resize(height=1008, width=1008),
 
-        # Geometric
-        A.HorizontalFlip(p=0.5),
-        A.VerticalFlip(p=0.5),
-        A.RandomRotate90(p=0.5),
-        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=45, p=0.35),
+            # Mild affine to avoid clipped slivers
+            A.Affine(
+                scale=(0.92, 1.08),
+                translate_percent=(-0.02, 0.02),
+                rotate=(-8, 8),
+                shear=(-5, 5),
+                fit_output=False,
+                p=0.6
+            ),
 
-        # Noise (Very Light)
-        A.GaussNoise(var_limit=(5.0, 20.0), p=0.25),
+            A.OneOf(
+                [
+                    A.ColorJitter(brightness=0.20, contrast=0.20, saturation=0.20, hue=0.08),
+                    A.RandomBrightnessContrast(brightness_limit=0.20, contrast_limit=0.20),
+                    A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=18, val_shift_limit=12),
+                    A.RandomGamma(gamma_limit=(85, 115)),
+                ],
+                p=0.6
+            ),
 
-        # Blur
-        A.Blur(blur_limit=3, p=0.3),
+            noise,
+            A.OneOf(
+                [A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                 A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0)],
+                p=0.20
+            ),
 
-        # Color/Contrast
-        A.OneOf([
-            A.CLAHE(clip_limit=2),
-            A.Emboss(),
-            A.RandomBrightnessContrast(),
-        ], p=0.3),
+            dropout,
 
-        # Dropout
-        A.ChannelDropout(p=0.1),
-
-        # CoarseDropout (Cutout)
-        A.CoarseDropout(
-            max_holes=8,
-            max_height=64,
-            max_width=64,
-            fill_value=0,
-            p=0.2
+            A.ToFloat(max_value=255.0),
+            ToTensorV2()
+        ],
+        bbox_params=A.BboxParams(
+            format="pascal_voc",
+            label_fields=["labels"],
+            clip=True,
+            min_visibility=0.15,  # slightly stricter than 0.10 to reduce slivers
+            min_area=64,
         ),
+    )
 
-        A.ToFloat(max_value=255.0),
-        ToTensorV2()
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
+
+def get_train_transforms_DETR(processor: Sam3Processor, size: int = 1008):
+    # Pull the exact mean/std SAM3 expects
+    mean = processor.image_processor.image_mean
+    std = processor.image_processor.image_std
+
+    noise = A.OneOf(
+        [
+            A.GaussNoise(std_range=(0.01, 0.05), p=1.0),
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
+        ],
+        p=0.25
+    )
+
+    dropout = A.CoarseDropout(
+        num_holes_range=(1, 8),
+        hole_height_range=(10, 28),
+        hole_width_range=(10, 28),
+        fill=0,
+        p=0.20
+    )
+
+    return A.Compose(
+        [
+            A.Resize(size, size),
+
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+
+            A.Affine(
+                scale=(0.92, 1.08),
+                translate_percent=(-0.02, 0.02),
+                rotate=(-8, 8),
+                shear=(-5, 5),
+                fit_output=False,
+                p=0.6
+            ),
+
+            A.OneOf(
+                [
+                    A.ColorJitter(brightness=0.20, contrast=0.20, saturation=0.20, hue=0.08),
+                    A.RandomBrightnessContrast(brightness_limit=0.20, contrast_limit=0.20),
+                    A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=18, val_shift_limit=12),
+                    A.RandomGamma(gamma_limit=(85, 115)),
+                ],
+                p=0.6
+            ),
+
+            noise,
+            A.OneOf(
+                [A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+                 A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0)],
+                p=0.20
+            ),
+
+            dropout,
+
+            A.ToFloat(max_value=255.0),
+            A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
+            ToTensorV2()
+        ],
+        bbox_params=A.BboxParams(
+            format="pascal_voc",
+            label_fields=["labels"],
+            clip=True,
+            min_visibility=0.15,
+            min_area=64,
+        ),
+    )
+
+def get_valid_transforms_DETR(processor: Sam3Processor, size: int = 1008):
+    mean = processor.image_processor.image_mean
+    std = processor.image_processor.image_std
+
+    return A.Compose(
+        [
+            A.Resize(height=size, width=size),
+            A.ToFloat(max_value=255.0),
+            A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
+            ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="pascal_voc",
+            label_fields=["labels"],
+            clip=True,
+        ),
+    )
+
 
 def get_valid_transforms():
     """

@@ -5,6 +5,35 @@ import os
 import numpy as np
 from PIL import Image
 
+
+def filter_boxes_and_labels_pascal_voc(
+    bboxes, labels,
+    min_side: float = 20.0,
+    max_ar: float = 3.0,
+):
+    """
+    bboxes: list of [x_min, y_min, x_max, y_max] in pascal_voc coords (absolute pixels)
+    labels: list aligned with bboxes
+    Returns filtered (bboxes, labels).
+    """
+    if len(bboxes) == 0:
+        return bboxes, labels
+
+    b = np.asarray(bboxes, dtype=np.float32)
+    w = np.maximum(0.0, b[:, 2] - b[:, 0])
+    h = np.maximum(0.0, b[:, 3] - b[:, 1])
+
+    min_wh = np.minimum(w, h)
+    ar = np.where(h > 0, w / h, 1e9)
+
+    keep = (min_wh >= min_side) & (ar <= max_ar) & (ar >= 1.0 / max_ar)
+
+    b_f = b[keep].tolist()
+    l_f = np.asarray(labels)[keep].tolist()
+
+    return b_f, l_f
+
+
 class BethesdaDataset(Dataset):
     def __init__(self, csv_file, root_dir, transforms=None):
         self.root_dir = root_dir
@@ -58,9 +87,13 @@ class BethesdaDataset(Dataset):
         if self.transforms is not None:
             transformed = self.transforms(image=image, bboxes=boxes, labels=labels)
 
+            bboxes_f, labels_f = filter_boxes_and_labels_pascal_voc(
+                transformed["bboxes"], transformed["labels"], min_side=20.0, max_ar=3.0
+            )
+
             image = transformed['image']
-            boxes = transformed['bboxes']
-            labels = transformed['labels']
+            boxes = bboxes_f
+            labels = labels_f
 
         if len(boxes) > 0:
             # Si hay cajas, convertimos a tensor normal
