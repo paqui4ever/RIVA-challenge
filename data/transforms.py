@@ -84,6 +84,7 @@ def get_train_transforms_v3():
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
+        A.ShiftScaleRotate(shift_limit=0.0625, scale_limit=0.1, rotate_limit=45, p=0.2),
         
         # Noise (Very Light)
         A.GaussNoise(var_limit=(5.0, 20.0), p=0.2),
