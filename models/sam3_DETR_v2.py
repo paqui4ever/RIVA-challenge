@@ -96,6 +96,12 @@ class HungarianMatcher(nn.Module):
 
             # Classification cost: -P(class)
             # out_prob[b]: (Q, C+1) -> take columns of tgt_labels -> (Q, Nb)
+            # Validate labels are in valid range before indexing
+            assert tgt_labels.max() < num_classes_plus_bg, (
+                f"Label {tgt_labels.max().item()} is out of range! "
+                f"Expected labels in [0, {num_classes_plus_bg - 2}] (0-indexed, no-object at {num_classes_plus_bg - 1}). "
+                f"Found labels: {tgt_labels.tolist()}"
+            )
             cost_class = -out_prob[b][:, tgt_labels]
 
             # L1 bbox cost: (Q, Nb)
@@ -167,7 +173,18 @@ class SetCriterion(nn.Module):
         for b, (src_idx, tgt_idx) in enumerate(indices):
             if src_idx.numel() == 0:
                 continue
-            target_classes[b, src_idx] = targets[b]["labels"][tgt_idx]
+            tgt_labels = targets[b]["labels"][tgt_idx]
+            # Runtime assertion: labels must be in [0, num_classes-1]
+            assert tgt_labels.max() < self.num_classes, (
+                f"Label {tgt_labels.max().item()} >= num_classes ({self.num_classes})! "
+                f"Labels must be 0-indexed in [0, {self.num_classes-1}]. "
+                f"Found labels: {tgt_labels.tolist()}"
+            )
+            assert tgt_labels.min() >= 0, (
+                f"Negative label {tgt_labels.min().item()} found! "
+                f"Labels must be >= 0. Found labels: {tgt_labels.tolist()}"
+            )
+            target_classes[b, src_idx] = tgt_labels
 
         loss_ce = F.cross_entropy(
             pred_logits.transpose(1, 2),  # (B, C+1, Q)

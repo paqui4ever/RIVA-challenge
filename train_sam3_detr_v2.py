@@ -144,7 +144,11 @@ class BethesdaDatasetForSam3DETR(BethesdaDataset):
         for _, row in records.iterrows():
             x_center, y_center = row['x'], row['y']
             width, height = row['width'], row['height']
-            class_id = row['class']  # 0-indexed for this model (no +1, model handles no-object)
+            # CSV classes may be 1-indexed (1..8) for Bethesda classes
+            # DETR expects 0-indexed labels in [0..C-1], with C reserved for no-object
+            # So we subtract 1 to convert 1..8 -> 0..7
+            raw_class = row['class']
+            class_id = raw_class - 1 if raw_class >= 1 else raw_class  # Convert 1-indexed to 0-indexed
 
             x_min = x_center - (width / 2)
             y_min = y_center - (height / 2)
@@ -264,6 +268,48 @@ val_ds = BethesdaDatasetForSam3DETR(
     root_dir=VAL_PATH,
     transforms=val_transforms
 )
+
+# ----------------------------
+# Validate label ranges (CRITICAL for DETR)
+# ----------------------------
+print(f"\n{'='*60}")
+print("VALIDATING LABEL RANGES (DETR expects 0-indexed labels)")
+print(f"{'='*60}")
+
+# Check a sample of the dataset to verify label indexing
+import random
+sample_indices = random.sample(range(len(train_ds)), min(50, len(train_ds)))
+all_labels = []
+for idx in sample_indices:
+    _, target = train_ds[idx]
+    all_labels.extend(target["labels"].tolist())
+
+if all_labels:
+    min_label, max_label = min(all_labels), max(all_labels)
+    unique_labels = sorted(set(all_labels))
+    print(f"  Sample labels found: {unique_labels}")
+    print(f"  Label range: [{min_label}, {max_label}]")
+    print(f"  NUM_CLASSES = {NUM_CLASSES}")
+    print(f"  No-object index = {NUM_CLASSES} (should NOT appear in labels)")
+
+    # Critical validation
+    if max_label >= NUM_CLASSES:
+        raise ValueError(
+            f"FATAL: Found label {max_label} >= NUM_CLASSES ({NUM_CLASSES})!\n"
+            f"This will collide with the no-object class index.\n"
+            f"Labels must be in [0, {NUM_CLASSES-1}]. Found: {unique_labels}\n"
+            f"Check if your CSV uses 1-indexed classes and ensure proper conversion."
+        )
+    if min_label < 0:
+        raise ValueError(
+            f"FATAL: Found negative label {min_label}!\n"
+            f"Labels must be in [0, {NUM_CLASSES-1}]. Found: {unique_labels}"
+        )
+    print(f"  ✓ Labels are valid (0-indexed, in range [0, {NUM_CLASSES-1}])")
+else:
+    print("  WARNING: No labels found in sample - dataset may be empty")
+
+print(f"{'='*60}\n")
 
 # ----------------------------
 # Initialize DataLoaders
