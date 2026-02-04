@@ -380,7 +380,10 @@ def make_sam3_collate_fn(processor, prompt="cells"):
         attention_mask = enc.get("attention_mask", None)
 
         # avoid the warning: don't wrap a tensor with torch.tensor(...)
-        orig_sizes = enc["original_sizes"].to(torch.float32)
+        orig_sizes = enc["original_sizes"]
+        if not torch.is_tensor(orig_sizes):
+            orig_sizes = torch.as_tensor(orig_sizes)
+        orig_sizes = orig_sizes.to(torch.float32)
 
         # normalize GT boxes in [0,1] using orig_sizes (H,W)
         norm_targets = []

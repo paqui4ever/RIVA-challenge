@@ -371,7 +371,7 @@ def test_model_build_criterion(mock_sam3_cls):
 def test_model_forward_inference(mock_sam3_cls):
     """
     Verifies the forward pass in inference mode (no targets).
-    Output should contain logits, boxes, and sam3_outputs.
+    Output should contain logits and boxes.
     """
     B, Q, hidden_size = 2, 100, 256
     mock_model = create_mock_sam3_model(B, Q, hidden_size)
@@ -385,7 +385,6 @@ def test_model_forward_inference(mock_sam3_cls):
     # Check 1: Output structure
     assert "logits" in outputs, "Output should contain logits"
     assert "boxes" in outputs, "Output should contain boxes"
-    assert "sam3_outputs" in outputs, "Output should contain raw sam3_outputs"
 
     # Check 2: Output shapes
     assert outputs["logits"].shape == (B, Q, 9), \
@@ -489,11 +488,13 @@ def test_model_predict_max_detections(mock_sam3_cls):
 def test_collate_fn_structure():
     """
     Verifies that make_sam3_collate_fn produces correctly structured batches.
-    Output should be (pixel_values, normalized_targets, original_sizes).
+    Output should be (pixel_values, input_ids, attention_mask, normalized_targets, original_sizes).
     """
     mock_processor = MagicMock()
     mock_processor.return_value = {
         "pixel_values": torch.randn(2, 3, 1008, 1008),
+        "input_ids": torch.ones(2, 8, dtype=torch.long),
+        "attention_mask": torch.ones(2, 8, dtype=torch.long),
         "original_sizes": [[1024, 1024], [1024, 1024]],
     }
 
@@ -507,11 +508,15 @@ def test_collate_fn_structure():
         (img2, {"boxes": torch.tensor([[50., 50., 150., 150.]]), "labels": torch.tensor([1])}),
     ]
 
-    pixel_values, norm_targets, orig_sizes = collate_fn(batch)
+    pixel_values, input_ids, attention_mask, norm_targets, orig_sizes = collate_fn(batch)
 
     # Check 1: Pixel values shape
     assert pixel_values.shape == (2, 3, 1008, 1008), \
         f"Pixel values shape mismatch: {pixel_values.shape}"
+
+    # Check 1b: Text inputs present
+    assert input_ids.shape == (2, 8), f"input_ids shape mismatch: {input_ids.shape}"
+    assert attention_mask.shape == (2, 8), f"attention_mask shape mismatch: {attention_mask.shape}"
 
     # Check 2: Targets structure
     assert len(norm_targets) == 2, "Should have one target dict per image"
@@ -532,6 +537,8 @@ def test_collate_fn_box_normalization():
     mock_processor = MagicMock()
     mock_processor.return_value = {
         "pixel_values": torch.randn(1, 3, 1008, 1008),
+        "input_ids": torch.ones(1, 8, dtype=torch.long),
+        "attention_mask": torch.ones(1, 8, dtype=torch.long),
         "original_sizes": [[100, 200]],  # H=100, W=200
     }
 
@@ -544,7 +551,7 @@ def test_collate_fn_box_normalization():
         (img, {"boxes": torch.tensor([[20., 10., 40., 30.]]), "labels": torch.tensor([0])}),
     ]
 
-    _, norm_targets, _ = collate_fn(batch)
+    _, _, _, norm_targets, _ = collate_fn(batch)
 
     expected = torch.tensor([[0.1, 0.1, 0.2, 0.3]])
     assert torch.allclose(norm_targets[0]["boxes"], expected, atol=1e-5), \

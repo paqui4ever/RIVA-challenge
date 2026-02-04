@@ -20,8 +20,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformers import Sam3Processor
 
-from data.dataset import BethesdaDataset, filter_boxes_and_labels_pascal_voc
 from data.transforms import get_train_transforms_DETR, get_valid_transforms_DETR
+from data.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn
 from models.sam3_DETR_v2 import Sam3ForClosedSetDetection
 
 
@@ -111,148 +111,6 @@ NUM_CLASSES = 8  # 8 Bethesda classes (model adds +1 for no-object internally)
 # ----------------------------
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
-
-# ----------------------------
-# Dataset Wrapper for Sam3 DETR with Albumentations
-# ----------------------------
-class BethesdaDatasetForSam3DETR(BethesdaDataset):
-    """
-    Dataset that uses albumentations transforms for augmentation and normalization.
-    Returns pre-processed tensors (already normalized with SAM3 mean/std).
-    """
-    def __init__(self, csv_file, root_dir, transforms):
-        # Initialize with transforms - we handle preprocessing ourselves
-        super().__init__(csv_file, root_dir, transforms=None)
-        self.albu_transforms = transforms
-
-    def __getitem__(self, idx):
-        from PIL import Image
-        import numpy as np
-
-        image_id = self.image_ids[idx]
-        records = self.df[self.df['image_filename'] == image_id]
-
-        image_path = os.path.join(self.root_dir, image_id)
-        image = Image.open(image_path).convert('RGB')
-        image_np = np.array(image)
-
-        H, W, _ = image_np.shape  # numpy gives (H, W, C)
-
-        boxes = []
-        labels = []
-
-        for _, row in records.iterrows():
-            x_center, y_center = row['x'], row['y']
-            width, height = row['width'], row['height']
-            # CSV classes may be 1-indexed (1..8) for Bethesda classes
-            # DETR expects 0-indexed labels in [0..C-1], with C reserved for no-object
-            # So we subtract 1 to convert 1..8 -> 0..7
-            raw_class = row['class']
-            class_id = raw_class - 1 if raw_class >= 1 else raw_class  # Convert 1-indexed to 0-indexed
-
-            x_min = x_center - (width / 2)
-            y_min = y_center - (height / 2)
-            x_max = x_center + (width / 2)
-            y_max = y_center + (height / 2)
-
-            # Clamp to image bounds
-            x_min = max(0, min(x_min, W))
-            y_min = max(0, min(y_min, H))
-            x_max = max(0, min(x_max, W))
-            y_max = max(0, min(y_max, H))
-
-            if (x_max <= x_min) or (y_max <= y_min):
-                continue
-
-            boxes.append([x_min, y_min, x_max, y_max])
-            labels.append(class_id)
-
-        # Apply albumentations transforms (includes augmentation, resize, normalization)
-        transformed = self.albu_transforms(image=image_np, bboxes=boxes, labels=labels)
-
-        # Filter bboxes after augmentation (removes weird aspect ratios and small boxes)
-        bboxes_f, labels_f = filter_boxes_and_labels_pascal_voc(
-            transformed["bboxes"], transformed["labels"], min_side=32.0, max_ar=3.0
-        )
-
-        image_tensor = transformed['image']  # Already a tensor, normalized
-        boxes = bboxes_f
-        labels = labels_f
-
-        if len(boxes) > 0:
-            boxes = torch.as_tensor(boxes, dtype=torch.float32)
-            labels = torch.as_tensor(labels, dtype=torch.int64)
-        else:
-            boxes = torch.zeros((0, 4), dtype=torch.float32)
-            labels = torch.zeros((0,), dtype=torch.int64)
-
-        target = {
-            "boxes": boxes,
-            "labels": labels,
-            "orig_size": torch.tensor([H, W], dtype=torch.float32),  # Store original size for normalization
-        }
-
-        return image_tensor, target
-
-
-# ----------------------------
-# Custom collate function for pre-processed tensors
-# ----------------------------
-def make_detr_collate_fn(processor, target_size: int = 1008):
-    """
-    Collate function for datasets that return pre-processed tensors.
-    Images are already normalized by albumentations, so we skip processor normalization.
-
-    COORDINATE SYSTEM NOTE:
-    - We use HARD RESIZE (A.Resize) which warps images to target_size × target_size
-    - This changes aspect ratio but simplifies coordinate handling
-    - Boxes are normalized to [0,1] by dividing by target_size
-    - To recover original coordinates: multiply by original (W, H)
-    - This works because: orig_coord → (orig_coord * target_size / orig_size) → (orig_coord / orig_size) → orig_coord
-
-    ALTERNATIVE: Letterbox resizing (resize longest side + pad) preserves aspect ratio
-    but requires tracking padding offsets. If SAM3 was pre-trained with letterbox,
-    hard resize may slightly reduce feature quality, but coordinates remain consistent.
-    """
-    def collate(batch):
-        images, targets = zip(*batch)
-
-        # Stack images (already tensors from albumentations ToTensorV2)
-        pixel_values = torch.stack(images, dim=0)
-
-        # Get original sizes and normalize boxes
-        orig_sizes = []
-        norm_targets = []
-
-        for t in targets:
-            orig_h, orig_w = t["orig_size"].tolist()
-            orig_sizes.append([orig_h, orig_w])
-
-            # Normalize boxes: they are in resized coordinates (target_size x target_size)
-            # Convert to [0, 1] range
-            boxes = t["boxes"].clone().float()
-            if boxes.numel() > 0:
-                boxes[:, [0, 2]] /= target_size  # x coords
-                boxes[:, [1, 3]] /= target_size  # y coords
-
-            norm_targets.append({
-                "labels": t["labels"].long(),
-                "boxes": boxes,
-            })
-
-        orig_sizes = torch.tensor(orig_sizes, dtype=torch.float32)
-
-        # Generate dummy input_ids for SAM3 (text prompt)
-        # We use a simple prompt for detection
-        texts = ["cells"] * len(images)
-        text_enc = processor.tokenizer(texts, return_tensors="pt", padding=True)
-        input_ids = text_enc["input_ids"]
-        attention_mask = text_enc.get("attention_mask", None)
-
-        return pixel_values, input_ids, attention_mask, norm_targets, orig_sizes
-
-    return collate
-
 
 # ----------------------------
 # Initialize Sam3Processor and Transforms
