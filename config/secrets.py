@@ -82,7 +82,7 @@ def get_hf_token(required: bool = True) -> Optional[str]:
 
 
 @lru_cache(maxsize=1)
-def get_sam3_processor(model_name: str = "facebook/sam3-base"):
+def get_sam3_processor(model_name: str = "facebook/sam3"):
     """
     Get a configured Sam3Processor with authentication.
 
