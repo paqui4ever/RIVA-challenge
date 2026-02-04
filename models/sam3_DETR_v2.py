@@ -1,5 +1,3 @@
-import math
-from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 import torch
@@ -17,6 +15,31 @@ from transformers import Sam3Model, Sam3Processor
 # ----------------------------
 # Box helpers (xyxy throughout)
 # ----------------------------
+def box_cxcywh_to_xyxy(boxes: Tensor) -> Tensor:
+    """
+    Convert boxes from center format (cx, cy, w, h) to corner format (x1, y1, x2, y2).
+    DETR-family models output cxcywh normalized boxes.
+    """
+    cx, cy, w, h = boxes.unbind(-1)
+    x1 = cx - 0.5 * w
+    y1 = cy - 0.5 * h
+    x2 = cx + 0.5 * w
+    y2 = cy + 0.5 * h
+    return torch.stack([x1, y1, x2, y2], dim=-1)
+
+
+def box_xyxy_to_cxcywh(boxes: Tensor) -> Tensor:
+    """
+    Convert boxes from corner format (x1, y1, x2, y2) to center format (cx, cy, w, h).
+    """
+    x1, y1, x2, y2 = boxes.unbind(-1)
+    cx = (x1 + x2) / 2
+    cy = (y1 + y2) / 2
+    w = x2 - x1
+    h = y2 - y1
+    return torch.stack([cx, cy, w, h], dim=-1)
+
+
 def box_xyxy_clamp(boxes: Tensor) -> Tensor:
     # boxes: (..., 4)
     x1, y1, x2, y2 = boxes.unbind(-1)
@@ -240,7 +263,11 @@ class Sam3ForClosedSetDetection(nn.Module):
         )
 
         dec_last = outputs.decoder_hidden_states[-1]
-        boxes = outputs.pred_boxes.clamp(0, 1)
+        # SAM3/DETR outputs pred_boxes in cxcywh normalized format
+        # Convert to xyxy for loss computation and consistency
+        boxes_cxcywh = outputs.pred_boxes.clamp(0, 1)
+        boxes = box_cxcywh_to_xyxy(boxes_cxcywh)
+        boxes = boxes.clamp(0, 1)  # Clamp again after conversion to ensure [0,1]
 
         # Align query counts: decoder may have extra queries (e.g., text query)
         # Slice decoder hidden states to match the number of predicted boxes
