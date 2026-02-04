@@ -202,6 +202,17 @@ def make_detr_collate_fn(processor, target_size: int = 1008):
     """
     Collate function for datasets that return pre-processed tensors.
     Images are already normalized by albumentations, so we skip processor normalization.
+
+    COORDINATE SYSTEM NOTE:
+    - We use HARD RESIZE (A.Resize) which warps images to target_size × target_size
+    - This changes aspect ratio but simplifies coordinate handling
+    - Boxes are normalized to [0,1] by dividing by target_size
+    - To recover original coordinates: multiply by original (W, H)
+    - This works because: orig_coord → (orig_coord * target_size / orig_size) → (orig_coord / orig_size) → orig_coord
+
+    ALTERNATIVE: Letterbox resizing (resize longest side + pad) preserves aspect ratio
+    but requires tracking padding offsets. If SAM3 was pre-trained with letterbox,
+    hard resize may slightly reduce feature quality, but coordinates remain consistent.
     """
     def collate(batch):
         images, targets = zip(*batch)
@@ -514,17 +525,28 @@ for epoch in range(start_epoch, num_epochs):
 
             for b in range(len(predictions)):
                 # Predictions are already in absolute coordinates from model.predict()
+                pred_boxes = predictions[b]['boxes'].cpu()
+
+                # Sanity check: predictions should be in valid absolute coordinate range
+                h, w = orig_sizes[b].tolist()
+                if pred_boxes.numel() > 0:
+                    assert pred_boxes[:, [0, 2]].max() <= w * 1.01, \
+                        f"Prediction x-coords exceed image width: max={pred_boxes[:, [0,2]].max():.1f}, w={w}"
+                    assert pred_boxes[:, [1, 3]].max() <= h * 1.01, \
+                        f"Prediction y-coords exceed image height: max={pred_boxes[:, [1,3]].max():.1f}, h={h}"
+
                 preds_cpu.append({
-                    'boxes': predictions[b]['boxes'].cpu(),
+                    'boxes': pred_boxes,
                     'scores': predictions[b]['scores'].cpu(),
                     'labels': predictions[b]['labels'].cpu()
                 })
 
                 # Convert normalized target boxes to absolute coordinates
-                h, w = orig_sizes[b].tolist()
+                # GT boxes are in [0,1] relative to target_size (1008x1008 hard-resized)
+                # Mapping: normalized_coord * orig_size = original_coord
                 tgt_boxes = targets[b]['boxes'].clone()
-                tgt_boxes[:, [0, 2]] *= w
-                tgt_boxes[:, [1, 3]] *= h
+                tgt_boxes[:, [0, 2]] *= w  # x coords × width
+                tgt_boxes[:, [1, 3]] *= h  # y coords × height
 
                 targets_cpu.append({
                     'boxes': tgt_boxes.cpu(),
