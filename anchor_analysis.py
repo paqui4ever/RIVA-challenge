@@ -44,21 +44,14 @@ def kmeans_1d(x: np.ndarray, k: int, max_iter: int = 50) -> np.ndarray:
     return np.sort(centroids)
 
 
-def split_levels(values, num_levels: int):
-    values = list(values)
-    values.sort()
-    if num_levels <= 1:
-        return [values]
-
-    base = len(values) // num_levels
-    remainder = len(values) % num_levels
-    groups = []
-    idx = 0
-    for i in range(num_levels):
-        take = base + (1 if i < remainder else 0)
-        groups.append(values[idx: idx + take])
-        idx += take
-    return groups
+def assign_levels(box_sides: np.ndarray, strides, anchor_scale: float) -> list:
+    nominal_sizes = [s * anchor_scale for s in strides]
+    levels = [[] for _ in strides]
+    for side in box_sides:
+        diffs = [abs(math.log2(side / ns)) for ns in nominal_sizes]
+        level_idx = int(np.argmin(diffs))
+        levels[level_idx].append(float(side))
+    return levels
 
 
 def main():
@@ -70,8 +63,9 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--use-train-transforms", action="store_true", help="Use training augmentations")
     parser.add_argument("--target-size", type=int, default=1008)
-    parser.add_argument("--num-anchors", type=int, default=8, help="Total anchor sizes to derive")
+    parser.add_argument("--num-anchors-per-level", type=int, default=2, help="Anchor sizes per FPN level")
     parser.add_argument("--num-levels", type=int, default=4, help="Number of FPN levels")
+    parser.add_argument("--anchor-scale", type=float, default=8.0, help="Nominal anchor size = stride * scale")
     parser.add_argument("--sam3-checkpoint", default="facebook/sam3", help="SAM3 checkpoint id or path")
     parser.add_argument("--skip-backbone", action="store_true", help="Skip backbone stride inference")
     parser.add_argument("--assume-strides", default="7,14,28,56", help="Fallback strides if backbone is skipped")
@@ -120,10 +114,6 @@ def main():
     ars = np.asarray(ars)
 
     side = np.sqrt(areas)
-    anchors = kmeans_1d(side, args.num_anchors)
-
-    level_groups = split_levels(anchors, args.num_levels)
-    level_groups = [tuple(int(round(v)) for v in grp) for grp in level_groups]
 
     ar_p10 = float(np.percentile(ars, 10))
     ar_p50 = float(np.percentile(ars, 50))
@@ -143,10 +133,25 @@ def main():
         with torch.no_grad():
             feats = model.backbone(dummy)
         strides = []
-        for k, v in feats.items():
+        for _, v in feats.items():
             stride = args.target_size / v.shape[-1]
             strides.append(int(round(stride)))
         strides = sorted(strides)
+
+    if len(strides) != args.num_levels:
+        raise ValueError(f"Expected {args.num_levels} strides, got {len(strides)}: {strides}")
+
+    level_sizes = assign_levels(side, strides, args.anchor_scale)
+    anchors_per_level = []
+    level_counts = []
+    for i, sizes in enumerate(level_sizes):
+        level_counts.append(len(sizes))
+        if len(sizes) >= args.num_anchors_per_level:
+            anchors = kmeans_1d(np.asarray(sizes), args.num_anchors_per_level)
+        else:
+            nominal = strides[i] * args.anchor_scale
+            anchors = np.array([nominal * 0.8, nominal * 1.2])[: args.num_anchors_per_level]
+        anchors_per_level.append(tuple(int(round(v)) for v in anchors))
 
     print("=== Box Size Summary ===")
     print(f"samples: {len(indices)}")
@@ -159,8 +164,15 @@ def main():
 
     print("\n=== Suggested Anchor Sizes ===")
     print(f"strides: {strides}")
-    print(f"sizes: {tuple(level_groups)}")
+    print(f"boxes per level: {level_counts}")
+    print(f"sizes: {tuple(anchors_per_level)}")
     print(f"aspect_ratios: {((ar_tuple),) * args.num_levels}")
+
+    print("\n=== AnchorGenerator Snippet ===")
+    print("AnchorGenerator(")
+    print(f"    sizes={tuple(anchors_per_level)},")
+    print(f"    aspect_ratios={((ar_tuple),) * args.num_levels},")
+    print(")")
 
 
 if __name__ == "__main__":
