@@ -23,6 +23,11 @@ parser.add_argument(
     action="store_true",
     help="If set, unfreeze backbone for sam3_rcnn_v2 (fine-tuning)"
 )
+parser.add_argument(
+    "--use_cosine_annealing",
+    action="store_true",
+    help="If set, enable CosineAnnealingLR scheduling"
+)
 args = parser.parse_args()
 
 # Checkpointing settings
@@ -55,7 +60,7 @@ try:
     from models.sam3_rcnn import get_sam3_faster_rcnn
     from models.sam3_DETR import get_sam3_detr
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
-    from data.transforms import get_train_transforms, get_valid_transforms
+    from data.transforms import get_train_transforms_RCNN, get_valid_transforms
 except ImportError as e:
     print(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
@@ -69,7 +74,7 @@ print("Initializing Datasets with SAM3 transforms (1008x1008)...")
 train_ds = BethesdaDataset(
     csv_file=CSV_PATH_TRAIN, 
     root_dir=TRAIN_PATH, 
-    transforms=get_train_transforms()
+    transforms=get_train_transforms_RCNN()
 )
 test_ds = BethesdaDataset(
     csv_file=CSV_PATH_VAL, 
@@ -123,7 +128,9 @@ optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 # 6. LEARNING RATE SCHEDULER
 num_epochs = 1000
 total_steps = num_epochs * len(train_loader)
-scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+scheduler = None
+if args.use_cosine_annealing:
+    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
 # 7. MIXED PRECISION SCALER
 scaler = GradScaler(enabled=USE_AMP)
@@ -138,7 +145,8 @@ if RESUME_CHECKPOINT and os.path.isfile(RESUME_CHECKPOINT):
     checkpoint = torch.load(RESUME_CHECKPOINT, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    if scheduler is not None and checkpoint.get('scheduler_state_dict') is not None:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     scaler.load_state_dict(checkpoint['scaler_state_dict'])
     start_epoch = checkpoint['epoch'] + 1
     global_step = checkpoint.get('global_step', 0)
@@ -229,14 +237,19 @@ for epoch in range(start_epoch, num_epochs):
         scaler.update()
 
         # Step the scheduler after each optimization step
-        scheduler.step()
+        if scheduler is not None:
+            scheduler.step()
 
         total_loss += losses.item()
         pbar.set_postfix({'loss': f"{losses.item():.4f}"})
 
         global_step += 1
 
-    writer.add_scalar("LearningRate", scheduler.get_last_lr()[0], epoch)
+    if scheduler is not None:
+        lr_value = scheduler.get_last_lr()[0]
+    else:
+        lr_value = optimizer.param_groups[0]['lr']
+    writer.add_scalar("LearningRate", lr_value, epoch)
 
     avg_loss = total_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
@@ -330,7 +343,7 @@ for epoch in range(start_epoch, num_epochs):
         'global_step': global_step,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'scheduler_state_dict': scheduler.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
         'scaler_state_dict': scaler.state_dict(),
         'best_map': best_map,
         'current_map': current_map,
