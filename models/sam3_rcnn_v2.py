@@ -9,7 +9,7 @@ from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
-from transformers import Sam3Processor, Sam3VisionModel
+from transformers import Sam3Processor, Sam3Model
 
 
 # -------------------------
@@ -81,7 +81,8 @@ class Sam3CutBBackbone(nn.Module):
     def __init__(self, model_name_or_path: str = "facebook/sam3", trainable: bool = True):
         super().__init__()
         self.processor = Sam3Processor.from_pretrained(model_name_or_path)
-        self.vision = Sam3VisionModel.from_pretrained(model_name_or_path)
+        model = Sam3Model.from_pretrained(model_name_or_path)
+        self.vision = model.vision_encoder if hasattr(model, "vision_encoder") else model
 
         # FPN channels are fixed by config (default 256)
         self.out_channels = int(getattr(self.vision.config, "fpn_hidden_size", 256))
