@@ -1,8 +1,10 @@
 import os
+
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
@@ -27,6 +29,11 @@ parser.add_argument(
     "--use_cosine_annealing",
     action="store_true",
     help="If set, enable CosineAnnealingLR scheduling"
+)
+parser.add_argument(
+    "--use_reduce_on_plateau",
+    action="store_true",
+    help="If set, enable ReduceLROnPlateau scheduling with patience=5"
 )
 args = parser.parse_args()
 
@@ -123,14 +130,19 @@ model.to(device)
 # 5. OPTIMIZER
 # Filter parameters requiring gradients (SAM3 backbone is frozen by default)
 params = [p for p in model.parameters() if p.requires_grad]
-optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
+optimizer = AdamW(params, lr=1e-3, weight_decay=1e-5)
 
 # 6. LEARNING RATE SCHEDULER
 num_epochs = 1000
 total_steps = num_epochs * len(train_loader)
 scheduler = None
+scheduler_type = None
 if args.use_cosine_annealing:
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
+    scheduler_type = 'cosine'
+elif args.use_reduce_on_plateau:
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=np.sqrt(0.1), verbose=True)
+    scheduler_type = 'plateau'
 
 # 7. MIXED PRECISION SCALER
 scaler = GradScaler(enabled=USE_AMP)
@@ -236,8 +248,8 @@ for epoch in range(start_epoch, num_epochs):
         scaler.step(optimizer)
         scaler.update()
 
-        # Step the scheduler after each optimization step
-        if scheduler is not None:
+        # Step the scheduler after each optimization step (only for cosine annealing)
+        if scheduler is not None and scheduler_type == 'cosine':
             scheduler.step()
 
         total_loss += losses.item()
@@ -336,6 +348,10 @@ for epoch in range(start_epoch, num_epochs):
     writer.add_scalar("Validation/mAP_50", results['map_50'], epoch)
     
     print(f"Validation Results - mAP (0.50:0.95): {current_map:.4f}")
+
+    # Step ReduceLROnPlateau scheduler based on validation mAP
+    if scheduler is not None and scheduler_type == 'plateau':
+        scheduler.step(current_map)
 
     # --- CHECKPOINTING ---
     checkpoint_dict = {
