@@ -14,6 +14,7 @@ from albumentations.pytorch import ToTensorV2
 try:
     from models.sam3_rcnn import get_sam3_faster_rcnn
     from models.sam3_DETR import get_sam3_detr
+    from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from data.transforms import get_valid_transforms
 except ImportError as e:
     print(f"Import Error: {e}. Make sure 'models' folder is in the path.")
@@ -49,7 +50,7 @@ def main():
     parser.add_argument(
         "--model", 
         type=str, 
-        choices=['sam3_rcnn', 'sam3_detr'],
+        choices=['sam3_rcnn', 'sam3_rcnn_v2', 'sam3_detr'],
         required=True,
         help="The model architecture to use"
     )
@@ -89,6 +90,12 @@ def main():
     if args.model == 'sam3_rcnn':
         print("Loading FasterRCNN with SAM3 backbone...")
         model = get_sam3_faster_rcnn(num_classes=num_classes)
+    elif args.model == 'sam3_rcnn_v2':
+        print("Loading FasterRCNN with SAM3 backbone (FPN multi-scale)...")
+        model = build_sam3_fasterrcnn(
+            model_name_or_path="facebook/sam3",
+            num_classes_closed_set=num_classes - 1
+        )
     elif args.model == 'sam3_detr':
         print("Loading DETR with SAM3 backbone...")
         model = get_sam3_detr(num_classes=num_classes)
@@ -164,6 +171,72 @@ def main():
                     # So row['class'] = class_id - 1.
                     pred_class = label - 1
                     
+                    # Filter invalid classes if any (e.g. background 0 -> -1)
+                    if pred_class < 0:
+                        continue
+
+                    results.append({
+                        'image_filename': filename,
+                        'x': x_center,
+                        'y': y_center,
+                        'width': width,
+                        'height': height,
+                        'conf': score,
+                        'class': pred_class
+                    })
+
+            elif args.model == 'sam3_rcnn_v2':
+                # FasterRCNN expects list of tensors; apply SAM3 resize+pad for Cut-B backbone
+                target_size = model.backbone.target_size
+                processed_image, _, meta = sam3_resize_longest_side_and_pad_square(
+                    image_tensor[0],
+                    target=None,
+                    target_size=target_size
+                )
+                outputs = model([processed_image])
+                output = outputs[0]
+
+                boxes = output['boxes'].cpu().numpy()
+                labels = output['labels'].cpu().numpy()
+                scores = output['scores'].cpu().numpy()
+
+                image_h, image_w = image_tensor.shape[-2:]
+                scale_x = orig_w / float(image_w)
+                scale_y = orig_h / float(image_h)
+
+                scale = meta.scale
+                resized_h, resized_w = meta.resized_hw
+                resized_w_limit = max(resized_w - 1, 0)
+                resized_h_limit = max(resized_h - 1, 0)
+
+                for box, label, score in zip(boxes, labels, scores):
+                    if score < args.conf_thresh:
+                        continue
+
+                    # RCNN Box: x1, y1, x2, y2
+                    x1, y1, x2, y2 = box
+
+                    # Clip to resized (pre-pad) region, then map back to preprocessed image
+                    x1 = min(max(x1, 0.0), resized_w_limit) / scale
+                    x2 = min(max(x2, 0.0), resized_w_limit) / scale
+                    y1 = min(max(y1, 0.0), resized_h_limit) / scale
+                    y2 = min(max(y2, 0.0), resized_h_limit) / scale
+
+                    # Convert to original image scale
+                    x1 *= scale_x
+                    x2 *= scale_x
+                    y1 *= scale_y
+                    y2 *= scale_y
+
+                    # Convert to Center Format: x, y, width, height
+                    width = x2 - x1
+                    height = y2 - y1
+                    x_center = x1 + width / 2
+                    y_center = y1 + height / 2
+
+                    # Convert Label
+                    pred_class = label - 1
+
                     # Filter invalid classes if any (e.g. background 0 -> -1)
                     if pred_class < 0:
                         continue
