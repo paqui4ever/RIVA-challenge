@@ -73,7 +73,7 @@ parser.add_argument(
 parser.add_argument(
     "--score_thresh",
     type=float,
-    default=0.3,
+    default=0.0,
     help="Score threshold for inference during validation"
 )
 parser.add_argument(
