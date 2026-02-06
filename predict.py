@@ -240,6 +240,10 @@ def main():
     else:
         # Create empty with columns if no predictions
         df = pd.DataFrame(columns=columns)
+
+    # Insert the 'id' column at the first position
+    # Each row gets a unique index starting from 0
+    df.insert(0, 'id', range(len(df)))
         
     df.to_csv(args.output, index=False)
     print(f"Saved predictions to {args.output}")
