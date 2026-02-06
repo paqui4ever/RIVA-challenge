@@ -280,10 +280,8 @@ class Sam3ForClosedSetDetection(nn.Module):
         )
 
         dec_last = outputs.decoder_hidden_states[-1]
-        # SAM3/DETR outputs pred_boxes in cxcywh normalized format
-        # Convert to xyxy for loss computation and consistency
-        boxes_cxcywh = outputs.pred_boxes
-        boxes = box_cxcywh_to_xyxy(boxes_cxcywh)
+        # SAM3 outputs pred_boxes already in normalized xyxy format
+        boxes = outputs.pred_boxes
 
         # Align query counts: decoder may have extra queries (e.g., text query)
         # Slice decoder hidden states to match the number of predicted boxes
