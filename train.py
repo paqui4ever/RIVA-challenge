@@ -67,7 +67,7 @@ try:
     from models.sam3_rcnn import get_sam3_faster_rcnn
     from models.sam3_DETR import get_sam3_detr
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
-    from data.transforms import get_train_transforms_RCNN, get_valid_transforms
+    from data.transforms import get_train_transforms_RCNN, get_valid_transforms, get_train_transforms_v2
 except ImportError as e:
     print(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
@@ -81,7 +81,7 @@ print("Initializing Datasets with SAM3 transforms (1008x1008)...")
 train_ds = BethesdaDataset(
     csv_file=CSV_PATH_TRAIN, 
     root_dir=TRAIN_PATH, 
-    transforms=get_train_transforms_RCNN()
+    transforms=get_train_transforms_v2()
 )
 test_ds = BethesdaDataset(
     csv_file=CSV_PATH_VAL, 
