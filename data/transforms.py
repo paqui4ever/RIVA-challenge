@@ -228,22 +228,6 @@ def get_train_transforms_DETR(processor: Sam3Processor, size: int = 1008):
     mean = processor.image_processor.image_mean
     std = processor.image_processor.image_std
 
-    noise = A.OneOf(
-        [
-            A.GaussNoise(std_range=(0.01, 0.05), p=1.0),
-            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.5), p=1.0),
-        ],
-        p=0.25
-    )
-
-    dropout = A.CoarseDropout(
-        num_holes_range=(1, 8),
-        hole_height_range=(10, 28),
-        hole_width_range=(10, 28),
-        fill=0,
-        p=0.20
-    )
-
     return A.Compose(
         [
             A.Resize(size, size),
@@ -253,36 +237,32 @@ def get_train_transforms_DETR(processor: Sam3Processor, size: int = 1008):
             A.RandomRotate90(p=0.5),
 
             A.Affine(
-                scale=(0.92, 1.08),
-                translate_percent=(-0.02, 0.02),
-                rotate=(-8, 8),
-                shear=(-5, 5),
-                fit_output=False,
-                p=0.6
+                scale=(0.95, 1.05),
+                translate_percent=0.02,
+                rotate=(-5, 5),
+                shear=(-1.2, 1.2),
+                p=0.2,
             ),
 
-            A.OneOf(
-                [
-                    A.ColorJitter(brightness=0.20, contrast=0.20, saturation=0.20, hue=0.08),
-                    A.RandomBrightnessContrast(brightness_limit=0.20, contrast_limit=0.20),
-                    A.HueSaturationValue(hue_shift_limit=8, sat_shift_limit=18, val_shift_limit=12),
-                    A.RandomGamma(gamma_limit=(85, 115)),
-                ],
-                p=0.6
+            A.GaussNoise(std_range=(0.075, 0.12), p=0.4),
+
+            A.CoarseDropout(
+                num_holes_range=(1, 8),
+                hole_height_range=(10, 28),
+                hole_width_range=(10, 28),
+                fill=0,
+                p=0.1,
             ),
 
-            noise,
-            A.OneOf(
-                [A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-                 A.Sharpen(alpha=(0.10, 0.30), lightness=(0.7, 1.0), p=1.0)],
-                p=0.20
+            A.RandomBrightnessContrast(
+                brightness_limit=0.12,
+                contrast_limit=0.12,
+                p=0.2,
             ),
-
-            dropout,
 
             A.ToFloat(max_value=255.0),
             A.Normalize(mean=mean, std=std, max_pixel_value=1.0),
-            ToTensorV2()
+            ToTensorV2(),
         ],
         bbox_params=A.BboxParams(
             format="pascal_voc",
