@@ -35,7 +35,7 @@ class BethesdaDatasetForSam3DETR(BethesdaDataset):
             x_center, y_center = row['x'], row['y']
             width, height = row['width'], row['height']
             raw_class = row['class']
-            class_id = raw_class - 1 if raw_class >= 1 else raw_class
+            class_id = raw_class
 
             x_min = x_center - (width / 2)
             y_min = y_center - (height / 2)
