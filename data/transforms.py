@@ -76,7 +76,11 @@ def get_train_transforms_v2():
         # checking against ImageNet stats. We output 0-1 float tensors here.
         A.ToFloat(max_value=255.0),
         ToTensorV2()
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
+    ], bbox_params=A.BboxParams(
+        format='pascal_voc', 
+        label_fields=['labels'],
+        min_visibility=0.3 # Drops boxes that are heavily clipped or cut off
+    ))
 
 
 def get_train_transforms_RCNN(size: int = 1008):
