@@ -46,19 +46,29 @@ def get_train_transforms_v2():
         A.VerticalFlip(p=0.5),
         A.RandomRotate90(p=0.5),
 
-        # RB and RC: Adjusts lighting and sharpness of your PAP smear images
-        A.RandomBrightnessContrast(
-            brightness_limit=0.2,
-            contrast_limit=0.2,
-            p=0.5
+        A.Affine(
+          scale=(0.95, 1.05),      # Scale between 95% and 105%
+          translate_percent=0.02,  # Shift up to 5%
+          rotate=(-5, 5),        # Rotation between -15 and 15 degrees
+          shear=(-1.2, 1.2),           # Very slight stretching (mimics slide tilt)
+          p=0.2
         ),
 
-        # RCD: Randomly "turns off" channels (e.g., sets a channel to 0)
-        # This forces the model to learn from available dye/stain info
-        A.ChannelDropout(
-            channel_drop_range=(1, 1), # Drops exactly 1 channel
-            fill_value=0,
-            p=0.5
+        A.GaussNoise(std_range=(0.075, 0.12), p=0.4),
+
+        A.CoarseDropout(
+          num_holes_range=(1, 8),
+          hole_height_range=(10, 28),
+          hole_width_range=(10, 28),
+          fill=0,
+          p=0.1
+        ),
+
+        # RB and RC: Adjusts lighting and sharpness of your PAP smear images
+        A.RandomBrightnessContrast(
+            brightness_limit=0.12,
+            contrast_limit=0.12,
+            p=0.2
         ),
 
         # Normalize to 0-1 and convert to Tensor
