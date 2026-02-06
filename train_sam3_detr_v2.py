@@ -61,14 +61,32 @@ parser.add_argument(
 parser.add_argument(
     "--lr_backbone",
     type=float,
-    default=1e-5,
+    default=5e-6,
     help="Learning rate for SAM3 backbone"
 )
 parser.add_argument(
     "--lr_head",
     type=float,
-    default=1e-4,
+    default=5e-4,
     help="Learning rate for classification head"
+)
+parser.add_argument(
+    "--use_focal",
+    action=argparse.BooleanOptionalAction,
+    default=True,
+    help="Use focal loss for classification (default: True)"
+)
+parser.add_argument(
+    "--focal_gamma",
+    type=float,
+    default=2.0,
+    help="Focal loss gamma parameter"
+)
+parser.add_argument(
+    "--focal_alpha",
+    type=float,
+    default=0.25,
+    help="Focal loss alpha for foreground vs background"
 )
 parser.add_argument(
     "--score_thresh",
@@ -222,6 +240,9 @@ model = (
         loss_ce_w=1.0,
         loss_bbox_w=5.0,
         loss_giou_w=2.0,
+        use_focal=args.use_focal,
+        focal_gamma=args.focal_gamma,
+        focal_alpha=args.focal_alpha,
     )
     .to(device)
 )
@@ -356,7 +377,7 @@ for epoch in range(start_epoch, num_epochs):
     # --- VALIDATION ---
     print("\nValidating...")
     model.eval()
-    metric = MeanAveragePrecision(iou_type="bbox")
+    metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", class_metrics=True)
 
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
@@ -426,6 +447,16 @@ for epoch in range(start_epoch, num_epochs):
     print(f"  mAP (0.50:0.95): {current_map:.4f}")
     print(f"  mAP@50: {map_50:.4f}")
     print(f"  mAP@75: {map_75:.4f}")
+
+    map_per_class = results.get("map_per_class", None)
+    if map_per_class is not None:
+        print("  Per-class AP:")
+        for class_idx, class_map in enumerate(map_per_class.tolist()):
+            if class_map != class_map:
+                class_str = "nan"
+            else:
+                class_str = f"{class_map:.4f}"
+            print(f"    Class {class_idx}: {class_str}")
 
     # --- CHECKPOINTING ---
     checkpoint_dict = {

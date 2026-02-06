@@ -138,6 +138,9 @@ class SetCriterion(nn.Module):
         matcher: HungarianMatcher,
         weight_dict: Dict[str, float],
         eos_coef: float = 0.1,
+        use_focal: bool = False,
+        focal_gamma: float = 2.0,
+        focal_alpha: Optional[float] = 0.25,
     ):
         """
         num_classes: number of foreground classes (8)
@@ -152,6 +155,9 @@ class SetCriterion(nn.Module):
         empty_weight = torch.ones(num_classes + 1)
         empty_weight[num_classes] = eos_coef
         self.register_buffer("empty_weight", empty_weight)
+        self.use_focal = use_focal
+        self.focal_gamma = focal_gamma
+        self.focal_alpha = focal_alpha
 
     def _get_src_permutation_idx(self, indices):
         # Permute predictions following indices
@@ -185,6 +191,27 @@ class SetCriterion(nn.Module):
                 f"Labels must be >= 0. Found labels: {tgt_labels.tolist()}"
             )
             target_classes[b, src_idx] = tgt_labels
+
+        if self.use_focal:
+            log_probs = F.log_softmax(pred_logits, dim=-1)
+            probs = log_probs.exp()
+            target_classes_exp = target_classes.unsqueeze(-1)
+            logpt = log_probs.gather(-1, target_classes_exp).squeeze(-1)
+            pt = probs.gather(-1, target_classes_exp).squeeze(-1)
+
+            focal = (1.0 - pt).pow(self.focal_gamma) * (-logpt)
+
+            if self.focal_alpha is not None:
+                alpha_t = torch.where(
+                    target_classes == self.num_classes,
+                    torch.tensor(1.0 - self.focal_alpha, device=device),
+                    torch.tensor(self.focal_alpha, device=device),
+                )
+                focal = focal * alpha_t
+
+            weight = self.empty_weight[target_classes]
+            loss_ce = (focal * weight).sum() / weight.sum().clamp(min=1.0)
+            return {"loss_ce": loss_ce}
 
         loss_ce = F.cross_entropy(
             pred_logits.transpose(1, 2),  # (B, C+1, Q)
@@ -304,6 +331,9 @@ class Sam3ForClosedSetDetection(nn.Module):
         loss_ce_w: float = 1.0,
         loss_bbox_w: float = 5.0,
         loss_giou_w: float = 2.0,
+        use_focal: bool = False,
+        focal_gamma: float = 2.0,
+        focal_alpha: Optional[float] = 0.25,
     ):
         matcher = HungarianMatcher(cost_class=class_cost, cost_bbox=bbox_cost, cost_giou=giou_cost)
         weight_dict = {"loss_ce": loss_ce_w, "loss_bbox": loss_bbox_w, "loss_giou": loss_giou_w}
@@ -312,6 +342,9 @@ class Sam3ForClosedSetDetection(nn.Module):
             matcher=matcher,
             weight_dict=weight_dict,
             eos_coef=eos_coef,
+            use_focal=use_focal,
+            focal_gamma=focal_gamma,
+            focal_alpha=focal_alpha,
         )
         return self
 
