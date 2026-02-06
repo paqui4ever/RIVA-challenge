@@ -282,9 +282,8 @@ class Sam3ForClosedSetDetection(nn.Module):
         dec_last = outputs.decoder_hidden_states[-1]
         # SAM3/DETR outputs pred_boxes in cxcywh normalized format
         # Convert to xyxy for loss computation and consistency
-        boxes_cxcywh = outputs.pred_boxes.clamp(0, 1)
+        boxes_cxcywh = outputs.pred_boxes
         boxes = box_cxcywh_to_xyxy(boxes_cxcywh)
-        boxes = boxes.clamp(0, 1)  # Clamp again after conversion to ensure [0,1]
 
         # Align query counts: decoder may have extra queries (e.g., text query)
         # Slice decoder hidden states to match the number of predicted boxes
@@ -353,6 +352,8 @@ class Sam3ForClosedSetDetection(nn.Module):
                 idx = topk.indices
                 l = l[idx]
                 bx = bx[idx]
+
+            bx = bx.clamp(0.0, 1.0)
 
             if orig_sizes is not None:
                 h, w = orig_sizes[b].tolist()
