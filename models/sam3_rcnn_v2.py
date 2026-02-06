@@ -150,17 +150,18 @@ def build_sam3_fasterrcnn(
     # SAM3 FPN has 4 levels by default (scale_factors length = 4). :contentReference[oaicite:5]{index=5}
     featmap_names = ["0", "1", "2", "3"]
 
+    # Adjusted for 1008x1008 input size (Original 100px objects become ~98px)
+    anchor_sizes = ((98.4375,), (98.4375,), (98.4375,), (98.4375,), (98.4375,)) # Takes into account resize of the image
+    aspect_ratios = ((1.0,),) * len(anchor_sizes) 
+    
     anchor_generator = AnchorGenerator(
-        # 4 FPN levels (featmap_names ["0","1","2","3"])
-        # Cover ~74–173px after resize (1008/1024)
-        sizes=((64, 80), (96, 112), (128, 160), (176, 192)),
-        # Mostly square objects -> keep ratios tight around 1
-        aspect_ratios=((0.85, 1.0, 1.15),) * 4,
+        sizes=anchor_sizes,
+        aspect_ratios=aspect_ratios
     )
 
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=featmap_names,
-        output_size=7,
+        output_size=14,
         sampling_ratio=2,
     )
 
@@ -169,6 +170,12 @@ def build_sam3_fasterrcnn(
         num_classes=num_classes_closed_set + 1,  # +1 background
         rpn_anchor_generator=anchor_generator,
         box_roi_pool=roi_pooler,
+        rpn_nms_thresh=0.75, # Increase a little bit to prevent merging two cells into one
+        # Defines what the RPN considers a "positive" anchor to train on.
+        box_fg_iou_thresh=0.65,  
+        # Usually kept the same as box_fg_iou_thresh to define the boundary 
+        # between "background" and "foreground".
+        box_bg_iou_thresh=0.65,
         # Make FasterRCNN's internal resize a no-op (we pre-pad to target_size x target_size)
         min_size=target_size,
         max_size=target_size,
