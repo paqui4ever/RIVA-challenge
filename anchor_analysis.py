@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import math
 import random
 
@@ -7,7 +8,7 @@ import numpy as np
 import torch
 
 from data.dataset import BethesdaDataset
-from data.transforms import get_train_transforms_RCNN, get_valid_transforms
+from data.transforms import get_train_transforms_v2, get_valid_transforms
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
 
 
@@ -54,6 +55,27 @@ def assign_levels(box_sides: np.ndarray, strides, anchor_scale: float) -> list:
     return levels
 
 
+def summarize_array(values: np.ndarray) -> dict:
+    if values.size == 0:
+        return {
+            "count": 0,
+            "mean": None,
+            "std": None,
+            "p10": None,
+            "p50": None,
+            "p90": None,
+        }
+
+    return {
+        "count": int(values.size),
+        "mean": float(values.mean()),
+        "std": float(values.std()),
+        "p10": float(np.percentile(values, 10)),
+        "p50": float(np.percentile(values, 50)),
+        "p90": float(np.percentile(values, 90)),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Suggest anchor sizes for SAM3 RCNN v2")
     parser.add_argument("--csv", required=True, help="Path to train.csv")
@@ -65,15 +87,16 @@ def main():
     parser.add_argument("--target-size", type=int, default=1008)
     parser.add_argument("--num-anchors-per-level", type=int, default=2, help="Anchor sizes per FPN level")
     parser.add_argument("--num-levels", type=int, default=4, help="Number of FPN levels")
-    parser.add_argument("--anchor-scale", type=float, default=8.0, help="Nominal anchor size = stride * scale")
+    parser.add_argument("--anchor-scale", type=float, default=8.0, help="Nominal anchor size = stride * scale (<=0 for auto)")
     parser.add_argument("--sam3-checkpoint", default="facebook/sam3", help="SAM3 checkpoint id or path")
     parser.add_argument("--skip-backbone", action="store_true", help="Skip backbone stride inference")
     parser.add_argument("--assume-strides", default="7,14,28,56", help="Fallback strides if backbone is skipped")
+    parser.add_argument("--output-json", default=None, help="Optional path to write stats as JSON")
     args = parser.parse_args()
 
     set_seed(args.seed)
 
-    transforms = get_train_transforms_RCNN() if args.use_train_transforms else get_valid_transforms()
+    transforms = get_train_transforms_v2() if args.use_train_transforms else get_valid_transforms()
     dataset = BethesdaDataset(csv_file=args.csv, root_dir=args.images, transforms=transforms)
 
     total = len(dataset)
@@ -94,6 +117,8 @@ def main():
         image, target, _ = sam3_resize_longest_side_and_pad_square(
             image, target, target_size=args.target_size
         )
+        if target is None:
+            continue
         boxes = target["boxes"]
         if boxes.numel() == 0:
             continue
@@ -141,17 +166,23 @@ def main():
     if len(strides) != args.num_levels:
         raise ValueError(f"Expected {args.num_levels} strides, got {len(strides)}: {strides}")
 
-    level_sizes = assign_levels(side, strides, args.anchor_scale)
+    anchor_scale = args.anchor_scale
+    if anchor_scale <= 0:
+        anchor_scale = float(np.median(side) / np.median(strides))
+
+    level_sizes = assign_levels(side, strides, anchor_scale)
     anchors_per_level = []
     level_counts = []
+    level_stats = []
     for i, sizes in enumerate(level_sizes):
         level_counts.append(len(sizes))
+        level_stats.append(summarize_array(np.asarray(sizes)))
         if len(sizes) >= args.num_anchors_per_level:
             anchors = kmeans_1d(np.asarray(sizes), args.num_anchors_per_level)
         else:
-            nominal = strides[i] * args.anchor_scale
+            nominal = strides[i] * anchor_scale
             anchors = np.array([nominal * 0.8, nominal * 1.2])[: args.num_anchors_per_level]
-        anchors_per_level.append(tuple(int(round(v)) for v in anchors))
+        anchors_per_level.append(tuple(max(1, int(round(v))) for v in anchors))
 
     print("=== Box Size Summary ===")
     print(f"samples: {len(indices)}")
@@ -164,6 +195,7 @@ def main():
 
     print("\n=== Suggested Anchor Sizes ===")
     print(f"strides: {strides}")
+    print(f"anchor_scale: {anchor_scale:.3f}")
     print(f"boxes per level: {level_counts}")
     print(f"sizes: {tuple(anchors_per_level)}")
     print(f"aspect_ratios: {((ar_tuple),) * args.num_levels}")
@@ -173,6 +205,30 @@ def main():
     print(f"    sizes={tuple(anchors_per_level)},")
     print(f"    aspect_ratios={((ar_tuple),) * args.num_levels},")
     print(")")
+
+    if args.output_json:
+        payload = {
+            "samples": int(len(indices)),
+            "boxes": int(len(areas)),
+            "target_size": int(args.target_size),
+            "strides": strides,
+            "anchor_scale": float(anchor_scale),
+            "num_levels": int(args.num_levels),
+            "num_anchors_per_level": int(args.num_anchors_per_level),
+            "sizes": [list(level) for level in anchors_per_level],
+            "aspect_ratios": [list(ar_tuple) for _ in range(args.num_levels)],
+            "stats": {
+                "width": summarize_array(widths),
+                "height": summarize_array(heights),
+                "side": summarize_array(side),
+                "area": summarize_array(areas),
+                "aspect_ratio": summarize_array(ars),
+                "levels": level_stats,
+            },
+        }
+        with open(args.output_json, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+        print(f"\nWrote JSON stats to {args.output_json}")
 
 
 if __name__ == "__main__":
