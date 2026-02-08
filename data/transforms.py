@@ -277,6 +277,71 @@ def get_train_transforms_DETR(processor: Sam3Processor, size: int = 1008):
         ),
     )
 
+def get_train_transforms_DETR_v2(processor: Sam3Processor, size: int = 1008):
+    """
+    Applies Letterbox Resize (LongestMaxSize + Pad) to preserve aspect ratio.
+    """
+    return A.Compose(
+        [
+            # 1. Resize the longest side to 'size', keeping aspect ratio
+            A.LongestMaxSize(max_size=size, interpolation=cv2.INTER_CUBIC),
+            
+            # 2. Pad the shorter side with zeros (black) to make it square
+            A.PadIfNeeded(
+                min_height=size, 
+                min_width=size, 
+                border_mode=cv2.BORDER_CONSTANT, 
+                value=0,  # Pad with black (0)
+                mask_value=0
+            ),
+            
+            # 3. Augmentations (Safe for cytology)
+            A.HorizontalFlip(p=0.5),
+            A.VerticalFlip(p=0.5),
+            A.RandomRotate90(p=0.5),
+            
+            # 4. Normalize (using SAM3 stats)
+            A.Normalize(
+                mean=processor.image_mean,
+                std=processor.image_std,
+                max_pixel_value=255.0,
+            ),
+            
+            # 5. Convert to Tensor
+            A.pytorch.ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(
+            format="pascal_voc", 
+            label_fields=["labels"], 
+            min_area=1.0,  # Keep small boxes!
+            min_visibility=0.1
+        ),
+    )
+
+def get_valid_transforms_DETR_v2(processor, size=1008):
+    """
+    Validation transforms must match training geometry (Letterbox).
+    """
+    return A.Compose(
+        [
+            A.LongestMaxSize(max_size=size, interpolation=cv2.INTER_CUBIC),
+            A.PadIfNeeded(
+                min_height=size, 
+                min_width=size, 
+                border_mode=cv2.BORDER_CONSTANT, 
+                value=0,
+                mask_value=0
+            ),
+            A.Normalize(
+                mean=processor.image_mean,
+                std=processor.image_std,
+                max_pixel_value=255.0,
+            ),
+            A.pytorch.ToTensorV2(),
+        ],
+        bbox_params=A.BboxParams(format="pascal_voc", label_fields=["labels"]),
+    )
+
 def get_valid_transforms_DETR(processor: Sam3Processor, size: int = 1008):
     mean = processor.image_processor.image_mean
     std = processor.image_processor.image_std
