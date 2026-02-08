@@ -20,7 +20,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from transformers import Sam3Processor
 
-from data.transforms import get_train_transforms_DETR, get_valid_transforms_DETR
+from data.transforms import get_train_transforms_DETR_v2, get_valid_transforms_DETR_v2
 from data.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn
 from models.sam3_DETR_v2 import Sam3ForClosedSetDetection
 
@@ -138,8 +138,8 @@ processor = Sam3Processor.from_pretrained(SAM3_CHECKPOINT)
 
 # Create transforms with normalization using SAM3's mean/std
 TARGET_SIZE = 1008
-train_transforms = get_train_transforms_DETR(processor, size=TARGET_SIZE)
-val_transforms = get_valid_transforms_DETR(processor, size=TARGET_SIZE)
+train_transforms = get_train_transforms_DETR_v2(processor, size=TARGET_SIZE)
+val_transforms = get_valid_transforms_DETR_v2(processor, size=TARGET_SIZE)
 
 # ----------------------------
 # Initialize Datasets
