@@ -62,6 +62,58 @@ def evaluate_map(model, loader, target_size: int, device: torch.device, use_amp:
     return results
 
 
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+
+def visualize_prediction(image, target, prediction, epoch, save_dir="."):
+    """
+    Visualizes the ground truth and predicted bounding boxes on the image.
+    Args:
+        image: Tensor (C, H, W).
+        target: Dict with 'boxes' (N, 4).
+        prediction: Dict with 'boxes' (M, 4), 'scores' (M,).
+        epoch: Current epoch number.
+        save_dir: Directory to save the visualization.
+    """
+    # Move to CPU and numpy
+    img_np = image.permute(1, 2, 0).cpu().numpy()
+    
+    # Create figure and axes
+    fig, ax = plt.subplots(1, figsize=(10, 10))
+    ax.imshow(img_np)
+    
+    # Draw Ground Truth in Green
+    if target is not None:
+        boxes = target['boxes'].cpu().numpy()
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            w, h = x2 - x1, y2 - y1
+            rect = patches.Rectangle((x1, y1), w, h, linewidth=2, edgecolor='lime', facecolor='none', label='GT')
+            ax.add_patch(rect)
+            
+    # Draw Predictions in Red
+    if prediction is not None:
+        boxes = prediction['boxes'].cpu().numpy()
+        scores = prediction['scores'].cpu().numpy()
+        labels = prediction['labels'].cpu().numpy()
+        
+        for box, score, label in zip(boxes, scores, labels):
+            if score > 0.5: # Threshold
+                x1, y1, x2, y2 = box
+                w, h = x2 - x1, y2 - y1
+                rect = patches.Rectangle((x1, y1), w, h, linewidth=2, edgecolor='red', facecolor='none', label='Pred')
+                ax.add_patch(rect)
+                ax.text(x1, y1, f"{score:.2f}", color='white', fontsize=8, backgroundcolor='red')
+
+    plt.title(f"Epoch {epoch}")
+    plt.axis('off')
+    
+    # Save
+    save_path = Path(save_dir) / f"vis_epoch_{epoch}.png"
+    plt.savefig(save_path, bbox_inches='tight')
+    plt.close(fig)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Overfit SAM3 RCNN v2 on a few images")
     parser.add_argument("--csv", required=True, help="Path to train.csv")
@@ -86,7 +138,7 @@ def main():
     autocast_device = "cuda" if device.type == "cuda" else "cpu"
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
 
-    train_transforms = get_train_transforms_RCNN() if args.use_train_transforms else get_valid_transforms()
+    train_transforms = get_train_transforms_v2() if args.use_train_transforms else get_valid_transforms()
     val_transforms = get_valid_transforms()
 
     full_train_ds = BethesdaDataset(csv_file=args.csv, root_dir=args.images, transforms=train_transforms)
@@ -125,11 +177,15 @@ def main():
 
     target_size = model.backbone.target_size
 
+    # Create a directory for visualizations
+    vis_dir = Path("overfit_visualizations")
+    vis_dir.mkdir(exist_ok=True)
+
     for epoch in range(args.num_epochs):
         model.train()
         total_loss = 0.0
 
-        for images, targets in train_loader:
+        for batch_idx, (images, targets) in enumerate(train_loader):
             images = list(images)
             targets = list(targets)
             images, targets = preprocess_batch(images, targets, target_size, device)
@@ -145,6 +201,31 @@ def main():
             scaler.update()
 
             total_loss += float(loss.item())
+        
+        # Visualization every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            model.eval()
+            with torch.no_grad():
+                # Visualize the first image of the last batch in the loop
+                # Just need to make sure 'images' and 'targets' are available from the loop scope
+                # Since the loop runs at least once (num_images > 0), they should be fine.
+                # But to be safe, we can grab a fixed fixed image if we wanted consistent logic,
+                # but random shuffle is ON so it's whatever is in the last batch.
+                
+                # Careful: model() calls for inference can be different inside the loop if we don't handle it
+                # We need to call model([image]) to get predictions.
+                
+                # Use the last batch's first image
+                viz_img = images[0]
+                viz_tgt = targets[0]
+                
+                # Get predictions
+                with autocast(device_type=autocast_device, dtype=amp_dtype, enabled=use_amp):
+                    viz_preds = model([viz_img])
+                
+                visualize_prediction(viz_img, viz_tgt, viz_preds[0], epoch + 1, save_dir=vis_dir)
+            
+            model.train()
 
         avg_loss = total_loss / max(1, len(train_loader))
         results = evaluate_map(model, val_loader, target_size, device, use_amp, amp_dtype)
