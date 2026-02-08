@@ -149,6 +149,11 @@ def build_sam3_fasterrcnn(
 
     # SAM3 FPN has 4 levels by default (scale_factors length = 4). :contentReference[oaicite:5]{index=5}
     featmap_names = ["0", "1", "2", "3"]
+
+    # Adjusted for 1008x1008 input size (Original 100px objects become ~98px)
+    anchor_sizes = ((98.4375,), (98.4375,), (98.4375,), (98.4375,), (98.4375,)) # Takes into account resize of the image
+    aspect_ratios = ((1.0,),) * len(anchor_sizes) 
+    
     anchor_generator = AnchorGenerator(
          # 4 FPN levels (featmap_names ["0","1","2","3"])
          # Cover ~74–173px after resize (1008/1024)
