@@ -149,20 +149,31 @@ def build_sam3_fasterrcnn(
 
     # SAM3 FPN has 4 levels by default (scale_factors length = 4). :contentReference[oaicite:5]{index=5}
     featmap_names = ["0", "1", "2", "3"]
-
-    # Adjusted for 1008x1008 input size (Original 100px objects become ~98px)
-    anchor_sizes = ((98.4375,), (98.4375,), (98.4375,), (98.4375,), (98.4375,)) # Takes into account resize of the image
-    aspect_ratios = ((1.0,),) * len(anchor_sizes) 
-    
     anchor_generator = AnchorGenerator(
-        sizes=anchor_sizes,
-        aspect_ratios=aspect_ratios
+         # 4 FPN levels (featmap_names ["0","1","2","3"])
+         # Cover ~74–173px after resize (1008/1024)
+         # BASELINE
+         #sizes=((64, 80), (96, 112), (128, 160), (176, 192)),
+         # FOURTH BEST SO FAR
+         #sizes=((70, 80), (93, 110), (125, 150), (160, 180)),
+         # SECOND BEST SO FAR (MARGINAL DIFFERENCE WITH BEST)
+         # sizes=((70, 77), (93, 105), (125, 140), (160, 170)),
+         # THIRD BEST SO FAR 
+         # sizes=((72, 77), (96, 103), (130, 138), (163, 170)),
+         # BEST 
+         sizes=((71, 78), (92, 104), (123, 135), (158, 168)),
+         # Mostly square objects -> keep ratios tight around 1
+         # BASELINE
+         #aspect_ratios=((0.85, 1.0, 1.15),) * 4,
+         # BEST 
+         aspect_ratios=((0.82, 1.0, 1.12),) * 4,
     )
 
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=featmap_names,
-        output_size=14,
-        sampling_ratio=2,
+        #output_size=14,
+        output_size=11, # Tried with 9, 10, 11, 12. 11 is the best so far.
+        sampling_ratio=3, # Tried with 2, 3 and 4. They are all very similar, keeping it at 3 for now.
     )
 
     model = FasterRCNN(
@@ -170,12 +181,12 @@ def build_sam3_fasterrcnn(
         num_classes=num_classes_closed_set + 1,  # +1 background
         rpn_anchor_generator=anchor_generator,
         box_roi_pool=roi_pooler,
-        rpn_nms_thresh=0.75, # Increase a little bit to prevent merging two cells into one
-        # Defines what the RPN considers a "positive" anchor to train on.
-        box_fg_iou_thresh=0.65,  
-        # Usually kept the same as box_fg_iou_thresh to define the boundary 
-        # between "background" and "foreground".
-        box_bg_iou_thresh=0.65,
+        #rpn_nms_thresh=0.75, # Increase a little bit to prevent merging two cells into one
+        # # Defines what the RPN considers a "positive" anchor to train on.
+        #box_fg_iou_thresh=0.45,  
+        # # Usually kept the same as box_fg_iou_thresh to define the boundary 
+        # # between "background" and "foreground".
+        #box_bg_iou_thresh=0.45,
         # Make FasterRCNN's internal resize a no-op (we pre-pad to target_size x target_size)
         min_size=target_size,
         max_size=target_size,
