@@ -21,8 +21,8 @@ from torch.utils.tensorboard import SummaryWriter
 from transformers import Sam3Processor
 
 from data.transforms import get_train_transforms_DETR_v2, get_valid_transforms_DETR_v2
-from data.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn
-from models.sam3_DETR_v2 import Sam3ForClosedSetDetection
+from data.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn, postprocess_and_unletterbox
+from models.sam3_DETR_v2 import Sam3ForClosedSetDetection, box_cxcywh_to_xyxy
 
 
 # ----------------------------
@@ -325,7 +325,7 @@ for epoch in range(start_epoch, num_epochs):
         # Mixed precision forward pass
         with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
             outputs = model(pixel_values=pixel_values.to(device),
-                            input_ids=input_ids.to(device),
+                            input_ids=input_ids.to(device) if input_ids is not None else None,
                             attention_mask=None if attention_mask is None else attention_mask.to(device),
                             targets=[{k: v.to(device) for k, v in t.items()} for t in targets])
             losses = outputs["losses"]
@@ -383,7 +383,7 @@ for epoch in range(start_epoch, num_epochs):
         for batch in tqdm(val_loader, desc="Validation"):
             pixel_values, input_ids, attention_mask, targets, orig_sizes = batch
             pixel_values = pixel_values.to(device)
-            input_ids = input_ids.to(device)
+            input_ids = input_ids.to(device) if input_ids is not None else None
             attention_mask = None if attention_mask is None else attention_mask.to(device)
             orig_sizes = orig_sizes.to(device)
 
@@ -398,6 +398,19 @@ for epoch in range(start_epoch, num_epochs):
                     max_detections=100
                 )
 
+            # --- DEBUG CHECK ---
+            for b in range(len(predictions)):
+                boxes = predictions[b]['boxes'].cpu()
+                if boxes.numel() == 0: continue
+                
+                # Check: Is the value at index 2 (width/x2) smaller than index 0 (cx/x1)?
+                # If this is True, it CANNOT be x1,y1,x2,y2. It MUST be cx,cy,w,h.
+                if (boxes[:, 2] < boxes[:, 0]).any() or (boxes[:, 3] < boxes[:, 1]).any():
+                    print(f"DEBUG: Batch {b} - Boxes are definitely cx, cy, w, h!")
+                    print(f"Sample box: {boxes[0].tolist()}")
+                    break
+            # -------------------
+
             # Convert targets to absolute coordinates for metric computation
             preds_cpu = []
             targets_cpu = []
@@ -405,6 +418,15 @@ for epoch in range(start_epoch, num_epochs):
             for b in range(len(predictions)):
                 # Predictions are already in absolute coordinates from model.predict()
                 pred_boxes = predictions[b]['boxes'].cpu()
+
+                pred_boxes_xyxy = box_cxcywh_to_xyxy(pred_boxes)
+
+                orig_h, orig_w = orig_sizes[b].tolist()
+                pred_boxes_real = postprocess_and_unletterbox(
+                    pred_boxes_xyxy, 
+                    orig_size=(orig_h, orig_w), 
+                    target_size=1008
+                )
 
                 # Sanity check: predictions should be in valid absolute coordinate range
                 h, w = orig_sizes[b].tolist()
