@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import argparse
 import random
+import pandas as pd
 
 import numpy as np
 import torch
 from torch.optim import AdamW
 from torch.amp import GradScaler, autocast
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, WeightedRandomSampler
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 
 import sys
@@ -138,6 +139,38 @@ def main():
     autocast_device = "cuda" if device.type == "cuda" else "cpu"
     amp_dtype = torch.bfloat16 if args.amp_dtype == "bf16" else torch.float16
 
+    df = pd.read_csv(args.csv)
+
+    # INFL is the most common, so it gets weight 1.0. 
+    # ASCUS is the rarest, so it gets weight 21.0.
+    class_weights = {
+        'INFL': 1.00,
+        'NILM': 1.14,
+        'LSIL': 2.76,
+        'HSIL': 3.54,
+        'SCC':  4.03,
+        'ENDO': 6.53,
+        'ASCH': 13.80,
+        'ASCUS': 21.06
+    }
+
+    image_groups = df.groupby('image_filename')
+    unique_images = df['image_filename'].unique()
+
+    sample_weights = []
+
+    for img_name in unique_images:
+        # Get all classes present in this single image
+        classes_in_img = image_groups.get_group(img_name)['class_name'].values
+        
+        # The image weight is the MAXIMUM weight of any object inside it.
+        # This ensures that if an image has a rare class, it gets picked.
+        max_weight = max([class_weights[c] for c in classes_in_img])
+        sample_weights.append(max_weight)
+
+    # Convert to tensor
+    sample_weights = torch.DoubleTensor(sample_weights)
+
     train_transforms = get_train_transforms_v2() if args.use_train_transforms else get_valid_transforms()
     val_transforms = get_valid_transforms()
 
@@ -156,8 +189,16 @@ def main():
     train_ds = Subset(full_train_ds, indices)
     val_ds = Subset(full_val_ds, indices)
 
+    # Create sampler for the subset
+    subset_weights = sample_weights[indices] 
+    sampler = WeightedRandomSampler(
+        weights=subset_weights,
+        num_samples=len(subset_weights),
+        replacement=True
+    )
+
     batch_size = min(args.batch_size, args.num_images)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, shuffle=False, collate_fn=collate_fn)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
     print(f"Using device: {device}")
