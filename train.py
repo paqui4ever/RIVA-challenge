@@ -403,7 +403,13 @@ for epoch in range(start_epoch, num_epochs):
     if scheduler is not None and scheduler_type == 'plateau':
         scheduler.step(avg_loss)
 
+    class_names = [
+        "Background", "NILM", "ENDO", "INFL", 
+        "ASCUS", "LSIL", "HSIL", "ASCH", "SCC"
+    ]
+
     map_per_class = results.get("map_per_class", None)
+    
     if map_per_class is not None:
         ap_dict = {}
         print("  Per-class AP:")
