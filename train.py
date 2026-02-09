@@ -183,7 +183,7 @@ if args.use_cosine_annealing:
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
     scheduler_type = 'cosine'
 elif args.use_reduce_on_plateau:
-    scheduler = ReduceLROnPlateau(optimizer, mode='max', patience=5, factor=np.sqrt(0.1), verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=np.sqrt(0.1), verbose=True)
     scheduler_type = 'plateau'
 
 # 7. MIXED PRECISION SCALER
@@ -391,9 +391,9 @@ for epoch in range(start_epoch, num_epochs):
     
     print(f"Validation Results - mAP (0.50:0.95): {current_map:.4f}")
 
-    # Step ReduceLROnPlateau scheduler based on validation mAP
+    # Step ReduceLROnPlateau scheduler based on training loss plateau
     if scheduler is not None and scheduler_type == 'plateau':
-        scheduler.step(current_map)
+        scheduler.step(avg_loss)
 
     # --- CHECKPOINTING ---
     checkpoint_dict = {
