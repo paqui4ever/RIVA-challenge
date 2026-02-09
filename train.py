@@ -1,6 +1,7 @@
 import os
 
 import numpy as np
+import pandas as pd
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from torch.optim import AdamW
@@ -34,6 +35,11 @@ parser.add_argument(
     "--use_reduce_on_plateau",
     action="store_true",
     help="If set, enable ReduceLROnPlateau scheduling with patience=5"
+)
+parser.add_argument(
+    "--use_weighted_sampler",
+    action="store_true",
+    help="If set, enable WeightedRandomSampler for class imbalance"
 )
 args = parser.parse_args()
 
@@ -76,45 +82,47 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
 # ADDRESSING CLASS IMBALANCE
+sampler = None
+train_shuffle = True
 
-df = pd.read_csv(CSV_PATH_TRAIN)
+if args.use_weighted_sampler:
+    print("Using WeightedRandomSampler for class imbalance handling...")
+    df = pd.read_csv(CSV_PATH_TRAIN)
 
-# INFL is the most common, so it gets weight 1.0. 
-# ASCUS is the rarest, so it gets weight 21.0.
-class_weights = {
-    'INFL': 1.00,
-    'NILM': 1.14,
-    'LSIL': 2.76,
-    'HSIL': 3.54,
-    'SCC':  4.03,
-    'ENDO': 6.53,
-    'ASCH': 13.80,
-    'ASCUS': 21.06
-}
+    # INFL is the most common, so it gets weight 1.0.
+    # ASCUS is the rarest, so it gets weight 21.0.
+    class_weights = {
+        'INFL': 1.00,
+        'NILM': 1.14,
+        'LSIL': 2.76,
+        'HSIL': 3.54,
+        'SCC':  4.03,
+        'ENDO': 6.53,
+        'ASCH': 13.80,
+        'ASCUS': 21.06
+    }
 
-image_groups = df.groupby('image_filename')
-unique_images = df['image_filename'].unique()
+    image_groups = df.groupby('image_filename')
+    unique_images = df['image_filename'].unique()
+    sample_weights = []
 
-sample_weights = []
+    for img_name in unique_images:
+        classes_in_img = image_groups.get_group(img_name)['class_name'].values
 
-for img_name in unique_images:
-    # Get all classes present in this single image
-    classes_in_img = image_groups.get_group(img_name)['class_name'].values
-    
-    # The image weight is the MAXIMUM weight of any object inside it.
-    # This ensures that if an image has a rare class, it gets picked.
-    max_weight = max([class_weights[c] for c in classes_in_img])
-    sample_weights.append(max_weight)
+        # The image weight is the MAXIMUM weight of any object inside it.
+        # This ensures that if an image has a rare class, it gets picked.
+        max_weight = max([class_weights[c] for c in classes_in_img])
+        sample_weights.append(max_weight)
 
-# Convert to tensor
-sample_weights = torch.DoubleTensor(sample_weights)
-
-# 4. Create the Sampler
-sampler = WeightedRandomSampler(
-    weights=sample_weights,
-    num_samples=len(sample_weights),
-    replacement=True  # Essential: allows resampling rare images multiple times per epoch
-)
+    sample_weights = torch.DoubleTensor(sample_weights)
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True  # Allows resampling rare images multiple times per epoch
+    )
+    train_shuffle = False
+else:
+    print("Using default shuffled sampling (no weighted sampler).")
 
 # 3. DATASETS & DATALOADERS
 
@@ -138,8 +146,8 @@ BATCH_SIZE = 4
 train_loader = DataLoader(
     train_ds, 
     batch_size=BATCH_SIZE,
-    sampler=sampler,  # Add sampler to attack class imbalance
-    shuffle=False, 
+    sampler=sampler,
+    shuffle=train_shuffle,
     collate_fn=collate_fn_sam
 )
 test_loader = DataLoader(
