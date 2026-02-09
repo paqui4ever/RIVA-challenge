@@ -403,6 +403,24 @@ for epoch in range(start_epoch, num_epochs):
     if scheduler is not None and scheduler_type == 'plateau':
         scheduler.step(avg_loss)
 
+    map_per_class = results.get("map_per_class", None)
+    if map_per_class is not None:
+        ap_dict = {}
+        print("  Per-class AP:")
+        for class_idx, class_map in enumerate(map_per_class.tolist()):
+            if class_map != class_map:
+                class_str = "nan"
+            else:
+                class_str = f"{class_map:.4f}"
+                if class_idx < len(class_names):
+                    label = class_names[class_idx]
+                else:
+                    label = f"Class_{class_idx}"
+                ap_dict[label] = class_map
+            print(f"    Class {label}: {class_str}")
+
+        writer.add_scalars(f"Validation/AP_per_class", ap_dict, epoch)
+
     # --- CHECKPOINTING ---
     checkpoint_dict = {
         'epoch': epoch,
