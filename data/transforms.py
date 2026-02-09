@@ -1,4 +1,5 @@
 
+import cv2
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 from transformers import Sam3Processor
@@ -290,9 +291,7 @@ def get_train_transforms_DETR_v2(processor: Sam3Processor, size: int = 1008):
             A.PadIfNeeded(
                 min_height=size, 
                 min_width=size, 
-                border_mode=cv2.BORDER_CONSTANT, 
-                value=0,  # Pad with black (0)
-                mask_value=0
+                border_mode=cv2.BORDER_CONSTANT,
             ),
             
             # 3. Augmentations (Safe for cytology)
@@ -302,8 +301,8 @@ def get_train_transforms_DETR_v2(processor: Sam3Processor, size: int = 1008):
             
             # 4. Normalize (using SAM3 stats)
             A.Normalize(
-                mean=processor.image_mean,
-                std=processor.image_std,
+                mean=processor.image_processor.image_mean,
+                std=processor.image_processor.image_std,
                 max_pixel_value=255.0,
             ),
             
@@ -329,12 +328,10 @@ def get_valid_transforms_DETR_v2(processor, size=1008):
                 min_height=size, 
                 min_width=size, 
                 border_mode=cv2.BORDER_CONSTANT, 
-                value=0,
-                mask_value=0
             ),
             A.Normalize(
-                mean=processor.image_mean,
-                std=processor.image_std,
+                mean=processor.image_processor.image_mean,
+                std=processor.image_processor.image_std,
                 max_pixel_value=255.0,
             ),
             A.pytorch.ToTensorV2(),
