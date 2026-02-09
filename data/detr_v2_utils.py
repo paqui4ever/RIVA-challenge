@@ -123,8 +123,64 @@ def make_detr_collate_fn(processor, target_size: int = 1008):
         texts = ["cells"] * len(images)
         text_enc = processor.tokenizer(texts, return_tensors="pt", padding=True)
         input_ids = text_enc["input_ids"]
+        # Values can't be None, look for way to not use text prompts
+        #input_ids = None
+        #attention_mask = None
         attention_mask = text_enc.get("attention_mask", None)
 
         return pixel_values, input_ids, attention_mask, norm_targets, orig_sizes
 
     return collate
+
+def postprocess_and_unletterbox(boxes_norm, orig_size, target_size=1008):
+    """
+    Converts normalized prediction boxes (cx,cy,w,h) OR (x1,y1,x2,y2) 
+    back to original image coordinates (x1,y1,x2,y2), accounting for Letterbox padding.
+    """
+    # 1. Convert from Center-Format (cx, cy, w, h) to Corner-Format (x1, y1, x2, y2)
+    #    CRITICAL: Check if your model outputs cxcywh. Most DETR-based models do.
+    #    If your model already outputs xyxy, comment this block out.
+    cx, cy, w, h = boxes_norm.unbind(-1)
+    x1 = cx - 0.5 * w
+    y1 = cy - 0.5 * h
+    x2 = cx + 0.5 * w
+    y2 = cy + 0.5 * h
+    boxes_xyxy = torch.stack([x1, y1, x2, y2], dim=-1)
+
+    # 2. Un-Letterbox Logic
+    #    Calculate the scale and padding that was applied during preprocessing
+    h_orig, w_orig = orig_size[0], orig_size[1]
+    
+    # Scale factor used (fitting longest side)
+    scale = target_size / max(h_orig, w_orig)
+    
+    # Dimensions of the image inside the padded square
+    new_h = h_orig * scale
+    new_w = w_orig * scale
+    
+    # Calculate padding (assuming Albumentations pads to center)
+    pad_h = (target_size - new_h) / 2
+    pad_w = (target_size - new_w) / 2
+    
+    # 3. Denormalize and Remove Padding
+    #    Predictions are in [0, 1] relative to the PADDED (1008x1008) image
+    boxes_real = boxes_xyxy.clone()
+    
+    # Scale normalized coords to target_size (pixels)
+    boxes_real[:, [0, 2]] *= target_size
+    boxes_real[:, [1, 3]] *= target_size
+    
+    # Subtract padding
+    boxes_real[:, [0, 2]] -= pad_w
+    boxes_real[:, [1, 3]] -= pad_h
+    
+    # Divide by scale to get back to original resolution
+    boxes_real /= scale
+    
+    # Clamp to original image boundaries
+    boxes_real[:, 0] = boxes_real[:, 0].clamp(min=0, max=w_orig)
+    boxes_real[:, 1] = boxes_real[:, 1].clamp(min=0, max=h_orig)
+    boxes_real[:, 2] = boxes_real[:, 2].clamp(min=0, max=w_orig)
+    boxes_real[:, 3] = boxes_real[:, 3].clamp(min=0, max=h_orig)
+    
+    return boxes_real
