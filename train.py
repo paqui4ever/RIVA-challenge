@@ -41,6 +41,13 @@ parser.add_argument(
     action="store_true",
     help="If set, enable WeightedRandomSampler for class imbalance"
 )
+parser.add_argument(
+    "--sam3_rcnn_v2_loss",
+    type=str,
+    choices=["custom", "original"],
+    default="custom",
+    help="Loss type for sam3_rcnn_v2 box head classification ('custom' focal loss or torchvision 'original')."
+)
 args = parser.parse_args()
 
 # Checkpointing settings
@@ -168,9 +175,11 @@ elif args.model == 'sam3_rcnn_v2':
     model = build_sam3_fasterrcnn(
         model_name_or_path="facebook/sam3",
         num_classes_closed_set=num_classes - 1,  # v2 adds +1 internally for background
-        trainable_backbone=args.trainable_backbone
+        trainable_backbone=args.trainable_backbone,
+        loss_type=args.sam3_rcnn_v2_loss,
     )
     print(f"  Backbone trainable: {args.trainable_backbone}")
+    print(f"  sam3_rcnn_v2 loss: {args.sam3_rcnn_v2_loss}")
 elif args.model == 'sam3_detr':
     print("Loading DETR with SAM3 backbone...")
     model = get_sam3_detr(num_classes=num_classes)

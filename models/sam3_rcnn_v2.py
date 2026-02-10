@@ -1,17 +1,19 @@
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from utils.loss import softmax_focal_loss, custom_faster_rcnn_loss
+from utils.loss import custom_faster_rcnn_loss
 
 import torch
 import torch.nn as nn
-import torchvision
 import torchvision.transforms.functional as TVF
 from torchvision.models.detection import FasterRCNN, roi_heads
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
 from transformers import Sam3Processor, Sam3Model
+
+
+_ORIGINAL_FASTRCNN_LOSS = roi_heads.fastrcnn_loss
 
 
 # -------------------------
@@ -145,7 +147,11 @@ def build_sam3_fasterrcnn(
     model_name_or_path: str = "facebook/sam3",
     num_classes_closed_set: int = 8,
     trainable_backbone: bool = True,
+    loss_type: str = "custom",
 ) -> FasterRCNN:
+    if loss_type not in {"custom", "original"}:
+        raise ValueError(f"Unsupported loss_type '{loss_type}'. Expected one of: 'custom', 'original'.")
+
     backbone = Sam3Backbone(model_name_or_path, trainable=trainable_backbone)
     target_size = backbone.target_size
 
@@ -179,7 +185,8 @@ def build_sam3_fasterrcnn(
         sampling_ratio=3, # Tried with 2, 3 and 4. They are all very similar, keeping it at 3 for now.
     )
 
-    torchvision.models.detection.roi_heads.fastrcnn_loss = custom_faster_rcnn_loss
+    selected_loss_fn = custom_faster_rcnn_loss if loss_type == "custom" else _ORIGINAL_FASTRCNN_LOSS
+    roi_heads.fastrcnn_loss = selected_loss_fn
 
     model = FasterRCNN(
         backbone=backbone,
@@ -199,9 +206,8 @@ def build_sam3_fasterrcnn(
         image_std=backbone.image_std,
     )
 
-    # Assert that the loss function has been changed successfully
-    assert roi_heads.fastrcnn_loss == custom_faster_rcnn_loss, \
-    "ERROR: The patch failed! The library is still using the original loss function."
+    assert roi_heads.fastrcnn_loss == selected_loss_fn, \
+    "ERROR: The patch failed! The selected Faster R-CNN loss function was not applied."
 
     # CRITICAL: FasterRCNN defaults to size_divisible=32.
     # This causes padding to 1024, resulting in 73x73 patches, mismatching 72x72 embeddings.
