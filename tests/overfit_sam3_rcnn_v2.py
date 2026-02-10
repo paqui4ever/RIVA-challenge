@@ -130,6 +130,7 @@ def main():
     parser.add_argument("--sam3-checkpoint", default="facebook/sam3", help="SAM3 checkpoint id or path")
     parser.add_argument("--amp", action="store_true", help="Enable AMP (CUDA only)")
     parser.add_argument("--amp-dtype", choices=["bf16", "fp16"], default="bf16", help="AMP dtype")
+    parser.add_argument("--weighted-sampling", action="store_true", default=False, help="Use weighted sampling")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -189,16 +190,20 @@ def main():
     train_ds = Subset(full_train_ds, indices)
     val_ds = Subset(full_val_ds, indices)
 
-    # Create sampler for the subset
-    subset_weights = sample_weights[indices] 
-    sampler = WeightedRandomSampler(
-        weights=subset_weights,
-        num_samples=len(subset_weights),
-        replacement=True
-    )
-
     batch_size = min(args.batch_size, args.num_images)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, shuffle=False, collate_fn=collate_fn)
+
+    if args.weighted_sampling:
+        # Create sampler for the subset
+        subset_weights = sample_weights[indices] 
+        sampler = WeightedRandomSampler(
+            weights=subset_weights,
+            num_samples=len(subset_weights),
+        replacement=True
+        )
+        train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, shuffle=False, collate_fn=collate_fn)
+    else:
+        train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, collate_fn=collate_fn)
+
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
 
     print(f"Using device: {device}")
