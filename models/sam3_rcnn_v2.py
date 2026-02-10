@@ -74,9 +74,9 @@ def sam3_resize_longest_side_and_pad_square(
 # -------------------------
 # Cut B backbone: SAM3 Vision (ViT + FPN) -> OrderedDict[str, Tensor] for FasterRCNN
 # -------------------------
-class Sam3CutBBackbone(nn.Module):
+class Sam3Backbone(nn.Module):
     """
-    Wraps Sam3VisionModel so it behaves like a torchvision detection backbone.
+    Wraps Sam3Model so it behaves like a torchvision detection backbone.
     Expects input: images tensor [B,3,H,W] already normalized & padded to 1008x1008.
     Returns: OrderedDict of multi-scale FPN feature maps with consistent channels.
     """
@@ -146,7 +146,7 @@ def build_sam3_fasterrcnn(
     num_classes_closed_set: int = 8,
     trainable_backbone: bool = True,
 ) -> FasterRCNN:
-    backbone = Sam3CutBBackbone(model_name_or_path, trainable=trainable_backbone)
+    backbone = Sam3Backbone(model_name_or_path, trainable=trainable_backbone)
     target_size = backbone.target_size
 
     # SAM3 FPN has 4 levels by default (scale_factors length = 4). :contentReference[oaicite:5]{index=5}

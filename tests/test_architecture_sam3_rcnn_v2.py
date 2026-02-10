@@ -9,7 +9,7 @@ sys.path.append(str(root))
 from models.sam3_rcnn_v2 import (
     build_sam3_fasterrcnn,
     sam3_resize_longest_side_and_pad_square,
-    Sam3CutBBackbone,
+    Sam3Backbone,
 )
 
 
@@ -34,7 +34,7 @@ def sam3_rcnn_v2_model():
 
 def test_backbone_is_sam3_cutb(sam3_rcnn_v2_model):
     """Verify the backbone is Sam3CutBBackbone."""
-    assert isinstance(sam3_rcnn_v2_model.backbone, Sam3CutBBackbone)
+    assert isinstance(sam3_rcnn_v2_model.backbone, Sam3Backbone)
 
 
 def test_backbone_target_size(sam3_rcnn_v2_model):
