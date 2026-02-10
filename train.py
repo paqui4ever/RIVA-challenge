@@ -1,4 +1,6 @@
 import os
+import sys
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -74,6 +76,11 @@ TRAIN_PATH = '/local_data/RIVA/images/images/train'
 VAL_PATH = '/local_data/RIVA/images/images/val'
 TEST_PATH = '/local_data/RIVA/images/images/test'
 
+# Ensure repository root is importable when running train.py directly
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 # Imports from other libraries
 try:
     from data.dataset import BethesdaDataset
@@ -82,7 +89,7 @@ try:
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from data.transforms import get_train_transforms_RCNN, get_valid_transforms, get_train_transforms_v2
 except ImportError as e:
-    print(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
+    raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
