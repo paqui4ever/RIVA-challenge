@@ -1,11 +1,13 @@
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
+from utils.loss import softmax_focal_loss, custom_faster_rcnn_loss
 
 import torch
 import torch.nn as nn
+import torchvision
 import torchvision.transforms.functional as TVF
-from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection import FasterRCNN, roi_heads
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
 
@@ -177,6 +179,8 @@ def build_sam3_fasterrcnn(
         sampling_ratio=3, # Tried with 2, 3 and 4. They are all very similar, keeping it at 3 for now.
     )
 
+    torchvision.models.detection.roi_heads.fastrcnn_loss = custom_faster_rcnn_loss
+
     model = FasterRCNN(
         backbone=backbone,
         num_classes=num_classes_closed_set + 1,  # +1 background
@@ -194,6 +198,10 @@ def build_sam3_fasterrcnn(
         image_mean=backbone.image_mean,
         image_std=backbone.image_std,
     )
+
+    # Assert that the loss function has been changed successfully
+    assert roi_heads.fastrcnn_loss == custom_faster_rcnn_loss, \
+    "ERROR: The patch failed! The library is still using the original loss function."
 
     # CRITICAL: FasterRCNN defaults to size_divisible=32.
     # This causes padding to 1024, resulting in 73x73 patches, mismatching 72x72 embeddings.
