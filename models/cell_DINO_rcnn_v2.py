@@ -327,7 +327,7 @@ def build_cell_dino_fasterrcnn(
 
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=featmap_names,
-        output_size=7,
+        output_size=11,
         sampling_ratio=2,
     )
 
