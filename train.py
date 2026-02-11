@@ -335,7 +335,7 @@ for epoch in range(start_epoch, num_epochs):
     # --- VALIDATION (mAP) ---
     print("Validating...")
     model.eval()
-    metric = MeanAveragePrecision(iou_type="bbox")
+    metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True)
     
     with torch.no_grad():
         for images, targets in tqdm(test_loader, desc="Validation"):
@@ -425,23 +425,54 @@ for epoch in range(start_epoch, num_epochs):
     ]
 
     map_per_class = results.get("map_per_class", None)
-    
-    if map_per_class is not None:
-        ap_dict = {}
-        print("  Per-class AP:")
-        for class_idx, class_map in enumerate(map_per_class.tolist()):
-            if class_map != class_map:
-                class_str = "nan"
-            else:
-                class_str = f"{class_map:.4f}"
-                if class_idx < len(class_names):
-                    label = class_names[class_idx]
-                else:
-                    label = f"Class_{class_idx}"
-                ap_dict[label] = class_map
-            print(f"    Class {label}: {class_str}")
+    classes = results.get("classes", None)
 
-        writer.add_scalars(f"Validation/AP_per_class", ap_dict, epoch)
+    if map_per_class is not None:
+        map_values = None
+        class_ids = None
+
+        if isinstance(map_per_class, torch.Tensor):
+            if map_per_class.ndim == 1:
+                map_values = map_per_class.detach().cpu().tolist()
+            elif map_per_class.ndim == 0:
+                map_values = None
+        elif isinstance(map_per_class, np.ndarray):
+            if map_per_class.ndim == 1:
+                map_values = map_per_class.tolist()
+        elif isinstance(map_per_class, (list, tuple)):
+            map_values = list(map_per_class)
+
+        if isinstance(classes, torch.Tensor):
+            class_ids = classes.detach().cpu().tolist()
+        elif isinstance(classes, np.ndarray):
+            class_ids = classes.tolist()
+        elif isinstance(classes, (list, tuple)):
+            class_ids = list(classes)
+
+        if map_values is None:
+            print("  Per-class AP unavailable (metric returned scalar map_per_class).")
+        else:
+            ap_dict = {}
+            print("  Per-class AP:")
+            for class_idx, class_map in enumerate(map_values):
+                class_id = int(class_ids[class_idx]) if class_ids is not None and class_idx < len(class_ids) else class_idx
+
+                if 0 <= class_id < len(class_names):
+                    label = class_names[class_id]
+                else:
+                    label = f"Class_{class_id}"
+
+                class_value = float(class_map)
+                if class_value != class_value:
+                    class_str = "nan"
+                else:
+                    class_str = f"{class_value:.4f}"
+                    ap_dict[label] = class_value
+
+                print(f"    Class {label}: {class_str}")
+
+            if ap_dict:
+                writer.add_scalars("Validation/AP_per_class", ap_dict, epoch)
 
     # --- CHECKPOINTING ---
     checkpoint_dict = {
