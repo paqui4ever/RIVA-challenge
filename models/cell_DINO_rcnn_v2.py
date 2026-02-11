@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import os
 # from dotenv import load_dotenv
@@ -12,6 +12,81 @@ import torchvision.transforms.functional as TVF
 from torchvision.models.detection import FasterRCNN
 from torchvision.models.detection.rpn import AnchorGenerator
 from torchvision.ops import MultiScaleRoIAlign
+
+
+_REFERENCE_TARGET_SIZE = 1008
+_SAM3_TUNED_ANCHOR_SIZES = ((71, 78), (92, 104), (123, 135), (158, 168))
+_SAM3_TUNED_ASPECT_RATIOS = ((0.82, 1.0, 1.12),) * 4
+_LEGACY_CELL_DINO_ANCHOR_SIZES = ((16, 24, 32), (48, 64, 80), (96, 128, 160), (192, 256, 320))
+_LEGACY_CELL_DINO_ASPECT_RATIOS = ((0.85, 1.0, 1.15),) * 4
+
+
+def _validate_anchor_layout(
+    sizes: Tuple[Tuple[int, ...], ...],
+    aspect_ratios: Tuple[Tuple[float, ...], ...],
+    num_levels: int,
+) -> None:
+    if len(sizes) != num_levels:
+        raise ValueError(f"Expected {num_levels} anchor size levels, got {len(sizes)}")
+    if len(aspect_ratios) != num_levels:
+        raise ValueError(f"Expected {num_levels} aspect ratio levels, got {len(aspect_ratios)}")
+
+
+def _coerce_anchor_sizes(sizes: Sequence[Sequence[int]]) -> Tuple[Tuple[int, ...], ...]:
+    return tuple(tuple(int(v) for v in level) for level in sizes)
+
+
+def _coerce_anchor_aspect_ratios(
+    aspect_ratios: Sequence[Sequence[float]],
+) -> Tuple[Tuple[float, ...], ...]:
+    return tuple(tuple(float(v) for v in level) for level in aspect_ratios)
+
+
+def _scale_anchor_sizes(
+    sizes: Tuple[Tuple[int, ...], ...],
+    target_size: int,
+    reference_target_size: int = _REFERENCE_TARGET_SIZE,
+) -> Tuple[Tuple[int, ...], ...]:
+    if target_size <= 0:
+        raise ValueError(f"target_size must be > 0, got {target_size}")
+
+    if target_size == reference_target_size:
+        return sizes
+
+    scale = float(target_size) / float(reference_target_size)
+    return tuple(
+        tuple(max(1, int(round(size * scale))) for size in level)
+        for level in sizes
+    )
+
+
+def _build_cell_dino_anchor_generator(
+    target_size: int,
+    num_levels: int,
+    anchor_profile: str = "sam3_tuned",
+    anchor_sizes: Optional[Sequence[Sequence[int]]] = None,
+    anchor_aspect_ratios: Optional[Sequence[Sequence[float]]] = None,
+) -> AnchorGenerator:
+    if anchor_sizes is not None:
+        sizes = _coerce_anchor_sizes(anchor_sizes)
+    elif anchor_profile == "sam3_tuned":
+        sizes = _scale_anchor_sizes(_SAM3_TUNED_ANCHOR_SIZES, target_size)
+    elif anchor_profile == "legacy":
+        sizes = _scale_anchor_sizes(_LEGACY_CELL_DINO_ANCHOR_SIZES, target_size)
+    else:
+        raise ValueError(
+            f"Unsupported anchor_profile '{anchor_profile}'. Expected one of: 'sam3_tuned', 'legacy'."
+        )
+
+    if anchor_aspect_ratios is not None:
+        aspect_ratios = _coerce_anchor_aspect_ratios(anchor_aspect_ratios)
+    elif anchor_profile == "sam3_tuned":
+        aspect_ratios = _SAM3_TUNED_ASPECT_RATIOS
+    else:
+        aspect_ratios = _LEGACY_CELL_DINO_ASPECT_RATIOS
+
+    _validate_anchor_layout(sizes, aspect_ratios, num_levels)
+    return AnchorGenerator(sizes=sizes, aspect_ratios=aspect_ratios)
 
 
 # -------------------------
@@ -230,36 +305,28 @@ def build_cell_dino_fasterrcnn(
     pretrained_checkpoint_path: Optional[str] = None,
     num_classes_closed_set: int = 8,
     trainable_backbone: bool = False,
+    anchor_profile: str = "sam3_tuned",
+    anchor_sizes: Optional[Sequence[Sequence[int]]] = None,
+    anchor_aspect_ratios: Optional[Sequence[Sequence[float]]] = None,
 ) -> FasterRCNN:
     
     backbone = CellDinoBackbone(
         model_name=model_name, 
-        # pretrained_checkpoint_path=pretrained_checkpoint_path,
+        pretrained_checkpoint_path=pretrained_checkpoint_path,
         trainable=trainable_backbone
     )
-    
-    # Strides: [7, 14, 28, 56]
-    # We need anchors that cover suitable pixel ranges for these strides.
-    # Standard FPN strides [4, 8, 16, 32] usually have sizes (32, 64, 128, 256, 512)
-    # Here we are shifted/scaled roughly.
-    
-    # Stride 7 (Map "0"): Small objects. ~14-28px
-    # Stride 14 (Map "1"): Medium. ~56px
-    # Stride 28 (Map "2"): Large. ~112px
-    # Stride 56 (Map "3"): Extra Large. ~224px+
-    
-    anchor_generator = AnchorGenerator(
-        sizes=(
-            (16, 24, 32),       # Stride 7
-            (48, 64, 80),       # Stride 14
-            (96, 128, 160),     # Stride 28
-            (192, 256, 320),    # Stride 56
-        ),
-        aspect_ratios=((0.85, 1.0, 1.15),) * 4,
+
+    featmap_names = ["0", "1", "2", "3"]
+    anchor_generator = _build_cell_dino_anchor_generator(
+        target_size=backbone.target_size,
+        num_levels=len(featmap_names),
+        anchor_profile=anchor_profile,
+        anchor_sizes=anchor_sizes,
+        anchor_aspect_ratios=anchor_aspect_ratios,
     )
 
     roi_pooler = MultiScaleRoIAlign(
-        featmap_names=["0", "1", "2", "3"],
+        featmap_names=featmap_names,
         output_size=7,
         sampling_ratio=2,
     )

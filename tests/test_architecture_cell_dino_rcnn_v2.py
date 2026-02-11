@@ -68,6 +68,21 @@ def test_backbone_forward_strides(cell_dino_model):
         assert f.shape[1] == 256, f"Feature {key} has wrong channels"
         assert f.shape[2:] == (h, w), f"Feature {key} shape mismatch. Got {f.shape[2:]}, expected {(h, w)}"
 
+
+def test_anchor_generator_multi_scale(cell_dino_model):
+    """Verify anchor generator uses 4 levels and tuned per-level settings."""
+    rpn_sizes = cell_dino_model.rpn.anchor_generator.sizes
+    rpn_ratios = cell_dino_model.rpn.anchor_generator.aspect_ratios
+
+    assert len(rpn_sizes) == 4
+    assert len(rpn_ratios) == 4
+
+    expected_sizes = ((71, 78), (92, 104), (123, 135), (158, 168))
+    expected_ratios = ((0.82, 1.0, 1.12),) * 4
+
+    assert tuple(tuple(v for v in level) for level in rpn_sizes) == expected_sizes
+    assert tuple(tuple(v for v in level) for level in rpn_ratios) == expected_ratios
+
 def test_resize_pad_preprocessing():
     """Test preprocessing ensures divisibility by 14 and 56 (target size 1008)."""
     img = torch.rand(3, 800, 1200)
@@ -83,6 +98,7 @@ def test_resize_pad_preprocessing():
     assert processed_img.shape == (3, 1008, 1008)
     assert processed_img.shape[1] % 56 == 0
     assert processed_img.shape[2] % 56 == 0
+    assert processed_target is not None
     
     # Check boxes scaled
     assert processed_target["boxes"].shape == target["boxes"].shape
