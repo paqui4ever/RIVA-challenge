@@ -195,10 +195,9 @@ def build_sam3_fasterrcnn(
         box_roi_pool=roi_pooler,
         #rpn_nms_thresh=0.75, # Increase a little bit to prevent merging two cells into one
         # # Defines what the RPN considers a "positive" anchor to train on.
-        #box_fg_iou_thresh=0.45,  
+        #box_fg_iou_thresh=0.40,  
         # # Usually kept the same as box_fg_iou_thresh to define the boundary 
         # # between "background" and "foreground".
-        #box_bg_iou_thresh=0.45,
         # Make FasterRCNN's internal resize a no-op (we pre-pad to target_size x target_size)
         min_size=target_size,
         max_size=target_size,
