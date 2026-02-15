@@ -17,6 +17,15 @@ from torchvision.ops import MultiScaleRoIAlign
 _REFERENCE_TARGET_SIZE = 1008
 _SAM3_TUNED_ANCHOR_SIZES = ((71, 78), (92, 104), (123, 135), (158, 168))
 _SAM3_TUNED_ASPECT_RATIOS = ((0.82, 1.0, 1.12),) * 4
+# SECOND BEST
+#_CELL_DINO_TUNED_ANCHOR_SIZES = ((78, 85), (94, 104), (110, 127), (132, 140))
+# BEST ANCHOR SIZES
+_CELL_DINO_TUNED_ANCHOR_SIZES = ((83, 84), (94, 96), (110, 112), (115, 117))
+#_CELL_DINO_TUNED_ANCHOR_SIZES = ((92, 93), (100, 102), (110, 112), (102, 104))
+#  SECOND BEST ASPECT RATIOS
+#_CELL_DINO_TUNED_ASPECT_RATIOS = ((0.825, 1.0, 1.115),) * 4
+# BEST ASPECT RATIOS (very similar to second best)
+_CELL_DINO_TUNED_ASPECT_RATIOS = ((0.825, 1.0, 1.05),) * 4
 _LEGACY_CELL_DINO_ANCHOR_SIZES = ((16, 24, 32), (48, 64, 80), (96, 128, 160), (192, 256, 320))
 _LEGACY_CELL_DINO_ASPECT_RATIOS = ((0.85, 1.0, 1.15),) * 4
 
@@ -73,6 +82,8 @@ def _build_cell_dino_anchor_generator(
         sizes = _scale_anchor_sizes(_SAM3_TUNED_ANCHOR_SIZES, target_size)
     elif anchor_profile == "legacy":
         sizes = _scale_anchor_sizes(_LEGACY_CELL_DINO_ANCHOR_SIZES, target_size)
+    elif anchor_profile == "cell_dino_tuned":
+        sizes = _scale_anchor_sizes(_CELL_DINO_TUNED_ANCHOR_SIZES, target_size)
     else:
         raise ValueError(
             f"Unsupported anchor_profile '{anchor_profile}'. Expected one of: 'sam3_tuned', 'legacy'."
@@ -82,6 +93,8 @@ def _build_cell_dino_anchor_generator(
         aspect_ratios = _coerce_anchor_aspect_ratios(anchor_aspect_ratios)
     elif anchor_profile == "sam3_tuned":
         aspect_ratios = _SAM3_TUNED_ASPECT_RATIOS
+    elif anchor_profile == "cell_dino_tuned":
+        aspect_ratios = _CELL_DINO_TUNED_ASPECT_RATIOS
     else:
         aspect_ratios = _LEGACY_CELL_DINO_ASPECT_RATIOS
 
@@ -240,13 +253,13 @@ class CellDinoBackbone(nn.Module):
         self.smooth_28 = nn.Conv2d(self.out_channels, self.out_channels, 3, padding=1)
         self.smooth_56 = nn.Conv2d(self.out_channels, self.out_channels, 3, padding=1)
 
-    @property
-    def image_mean(self) -> List[float]:
-        return [0.485, 0.456, 0.406] # Standard ImageNet
+    # @property
+    # def image_mean(self) -> List[float]:
+    #     return [0.485, 0.456, 0.406] # Standard ImageNet
 
-    @property
-    def image_std(self) -> List[float]:
-        return [0.229, 0.224, 0.225] # Standard ImageNet
+    # @property
+    # def image_std(self) -> List[float]:
+    #     return [0.229, 0.224, 0.225] # Standard ImageNet
 
     @property
     def target_size(self) -> int:
@@ -304,8 +317,8 @@ def build_cell_dino_fasterrcnn(
     model_name: str = "cell_dino_hpa_vitl14",
     pretrained_checkpoint_path: Optional[str] = None,
     num_classes_closed_set: int = 8,
-    trainable_backbone: bool = False,
-    anchor_profile: str = "sam3_tuned",
+    trainable_backbone: bool = True,
+    anchor_profile: str = "cell_dino_tuned",
     anchor_sizes: Optional[Sequence[Sequence[int]]] = None,
     anchor_aspect_ratios: Optional[Sequence[Sequence[float]]] = None,
 ) -> FasterRCNN:
@@ -327,7 +340,7 @@ def build_cell_dino_fasterrcnn(
 
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=featmap_names,
-        output_size=11,
+        output_size=11, # Tried with 14, 13, 12 and 11 (between 13 and 11 behavior is very similar)
         sampling_ratio=2,
     )
 
@@ -338,8 +351,8 @@ def build_cell_dino_fasterrcnn(
         box_roi_pool=roi_pooler,
         min_size=backbone.target_size,
         max_size=backbone.target_size,
-        image_mean=backbone.image_mean,
-        image_std=backbone.image_std,
+        # image_mean=backbone.image_mean,
+        # image_std=backbone.image_std,
     )
     
     # Disable internal resize since we pre-pad
