@@ -18,6 +18,8 @@ sys.path.append(str(root))
 from data.dataset import BethesdaDataset
 from data.transforms import get_train_transforms_RCNN, get_valid_transforms
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
+from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
+from torchvision.models.detection.rpn import RPNHead
 
 
 def set_seed(seed: int) -> None:
@@ -131,6 +133,8 @@ def main():
     parser.add_argument("--amp", action="store_true", help="Enable AMP (CUDA only)")
     parser.add_argument("--amp-dtype", choices=["bf16", "fp16"], default="bf16", help="AMP dtype")
     parser.add_argument("--weighted-sampling", action="store_true", default=False, help="Use weighted sampling")
+    parser.add_argument("--learn-anchors-single", action="store_true", help="Learn anchor sizes with single scale")
+    parser.add_argument("--learn-anchors-multiple", action="store_true", help="Learn anchor sizes with multiple scale")
     args = parser.parse_args()
 
     set_seed(args.seed)
@@ -217,8 +221,56 @@ def main():
     )
     model.to(device)
 
-    params = [p for p in model.parameters() if p.requires_grad]
-    optimizer = AdamW(params, lr=args.lr, weight_decay=1e-5)
+    if args.learn_anchors_single:
+        print("Replacing RPN anchor generator with learnable version...")
+        # Replace the default anchor generator with our learnable one
+        model.rpn.anchor_generator = LearnableAnchorGenerator(init_size=98.0).to(device)
+
+    if args.learn_anchors_multiple:
+        print("Replacing RPN anchor generator with learnable version...")
+        # Replace the default anchor generator with our learnable one
+        SIZES = ((71, 78), (92, 104), (123, 135), (158, 168))
+        ASPECT_RATIOS = ((0.82, 1.0, 1.12),) * 4
+        #SIZES = ((83, 84), (94, 96), (110, 112), (115, 117))
+        #ASPECT_RATIOS = ((0.825, 1.0, 1.05),) * 4
+        model.rpn.anchor_generator = FPNLearnableAnchorGenerator(SIZES, ASPECT_RATIOS).to(device)
+
+        num_anchors_per_location = len(SIZES[0]) * len(ASPECT_RATIOS[0]) # 2 * 3 = 6
+        in_channels = model.backbone.out_channels # Usually 256 for standard FPN
+
+        model.rpn.head = RPNHead(in_channels, num_anchors_per_location).to(device)
+
+    if args.learn_anchors_single or args.learn_anchors_multiple:
+        anchor_params = []
+        base_params = []
+
+        for name, param in model.named_parameters():
+            # Check if the parameter belongs to our custom anchor generator
+            if 'rpn.anchor_generator' in name:
+                anchor_params.append(param)
+            else:
+                base_params.append(param)
+
+        # 3. Construct the optimizer with parameter groups
+        # We apply the standard learning rate to the base model, 
+        # and a significantly reduced learning rate to the anchors.
+        optimizer = AdamW(
+            [
+                {
+                    'params': base_params, 
+                    'lr': args.lr, # default is 1e-4 
+                    'weight_decay': 1e-5
+                },
+                {
+                    'params': anchor_params, 
+                    'lr': args.lr,      
+                    'weight_decay': 0.0 
+                }
+            ]
+        )
+    else:
+        params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = AdamW(params, lr=args.lr, weight_decay=1e-5)
     scaler = GradScaler(enabled=use_amp)
 
     target_size = model.backbone.target_size
