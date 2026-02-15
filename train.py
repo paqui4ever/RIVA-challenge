@@ -50,6 +50,8 @@ parser.add_argument(
     default="custom",
     help="Loss type for sam3_rcnn_v2 box head classification ('custom' focal loss or torchvision 'original')."
 )
+parser.add_argument("--learn-anchors-single", action="store_true", help="Learn anchor sizes with single scale")
+parser.add_argument("--learn-anchors-multiple", action="store_true", help="Learn anchor sizes with multiple scale")
 args = parser.parse_args()
 
 # Checkpointing settings
@@ -87,7 +89,10 @@ try:
     from models.sam3_rcnn import get_sam3_faster_rcnn
     from models.sam3_DETR import get_sam3_detr
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
+    from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from data.transforms import get_train_transforms_RCNN, get_valid_transforms, get_train_transforms_v2
+    from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
+    from torchvision.models.detection.rpn import RPNHead
 except ImportError as e:
     raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
@@ -187,6 +192,23 @@ elif args.model == 'sam3_rcnn_v2':
     )
     print(f"  Backbone trainable: {args.trainable_backbone}")
     print(f"  sam3_rcnn_v2 loss: {args.sam3_rcnn_v2_loss}")
+
+    if args.learn_anchors_single:
+        print("Replacing RPN anchor generator with learnable version...")
+        # Replace the default anchor generator with our learnable one
+        model.rpn.anchor_generator = LearnableAnchorGenerator(init_size=98.0) #.to(device) will happen later
+
+    if args.learn_anchors_multiple:
+        print("Replacing RPN anchor generator with learnable version...")
+        # Replace the default anchor generator with our learnable one
+        SIZES = ((71, 78), (92, 104), (123, 135), (158, 168))
+        ASPECT_RATIOS = ((0.82, 1.0, 1.12),) * 4
+        model.rpn.anchor_generator = FPNLearnableAnchorGenerator(SIZES, ASPECT_RATIOS) #.to(device) will happen later
+
+        num_anchors_per_location = len(SIZES[0]) * len(ASPECT_RATIOS[0]) # 2 * 3 = 6
+        in_channels = model.backbone.out_channels # Usually 256 for standard FPN
+
+        model.rpn.head = RPNHead(in_channels, num_anchors_per_location) #.to(device) will happen later
 elif args.model == 'sam3_detr':
     print("Loading DETR with SAM3 backbone...")
     model = get_sam3_detr(num_classes=num_classes)
@@ -196,7 +218,40 @@ model.to(device)
 # 5. OPTIMIZER
 # Filter parameters requiring gradients (SAM3 backbone is frozen by default)
 params = [p for p in model.parameters() if p.requires_grad]
-optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
+
+if args.learn_anchors_single or args.learn_anchors_multiple:
+    anchor_params = []
+    base_params = []
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        # Check if the parameter belongs to our custom anchor generator
+        if 'rpn.anchor_generator' in name:
+            anchor_params.append(param)
+        else:
+            base_params.append(param)
+
+    # 3. Construct the optimizer with parameter groups
+    # We apply the standard learning rate to the base model, 
+    # and a significantly reduced learning rate to the anchors.
+    # Note: Using weight_decay=0.0 for anchors as per original script logic
+    optimizer = AdamW(
+        [
+            {
+                'params': base_params, 
+                'lr': 1e-4, 
+                'weight_decay': 1e-5
+            },
+            {
+                'params': anchor_params, 
+                'lr': 1e-4,      
+                'weight_decay': 0.0 
+            }
+        ]
+    )
+else:
+    optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 
 # 6. LEARNING RATE SCHEDULER
 num_epochs = 200
