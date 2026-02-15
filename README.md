@@ -18,6 +18,8 @@ The third model architecture, and the one we will begin experimenting with, uses
 
 Our latest improvement consists of using [LoRA](https://arxiv.org/pdf/2106.09685) finetuning on the Cell-DINO + Faster-RCNN and SAM3 + DETR models.
 
+We are also currently experimenting with [learnable anchors](https://arxiv.org/pdf/1812.00469), [focal loss](https://arxiv.org/pdf/1708.02002) and [weighted random sampling](https://www.sciencedirect.com/science/article/pii/S002001900500298X).
+
 > Training the LoRA models is currently not supported.
 
 ## 🚀 Quick start
@@ -139,5 +141,40 @@ If you use this code in your research, please cite:
       archivePrefix={arXiv},
       primaryClass={cs.CL},
       url={https://arxiv.org/abs/2106.09685}, 
+}
+
+@misc{zhong2020anchorboxoptimizationobject,
+      title={Anchor Box Optimization for Object Detection}, 
+      author={Yuanyi Zhong and Jianfeng Wang and Jian Peng and Lei Zhang},
+      year={2020},
+      eprint={1812.00469},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/1812.00469}, 
+}
+
+@misc{lin2018focallossdenseobject,
+      title={Focal Loss for Dense Object Detection}, 
+      author={Tsung-Yi Lin and Priya Goyal and Ross Girshick and Kaiming He and Piotr Dollár},
+      year={2018},
+      eprint={1708.02002},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/1708.02002}, 
+}
+
+@article{EFRAIMIDIS2006181,
+title = {Weighted random sampling with a reservoir},
+journal = {Information Processing Letters},
+volume = {97},
+number = {5},
+pages = {181-185},
+year = {2006},
+issn = {0020-0190},
+doi = {https://doi.org/10.1016/j.ipl.2005.11.003},
+url = {https://www.sciencedirect.com/science/article/pii/S002001900500298X},
+author = {Pavlos S. Efraimidis and Paul G. Spirakis},
+keywords = {Weighted random sampling, Reservoir sampling, Randomized algorithms, Data streams, Parallel algorithms},
+abstract = {In this work, a new algorithm for drawing a weighted random sample of size m from a population of n weighted items, where m⩽n, is presented. The algorithm can generate a weighted random sample in one-pass over unknown populations.}
 }
 ```
