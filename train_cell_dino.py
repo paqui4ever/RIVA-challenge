@@ -1,6 +1,7 @@
 import argparse
 import os
 
+import math
 import numpy as np
 import pandas as pd
 import torch
@@ -50,6 +51,12 @@ parser.add_argument(
     "--use_weighted_sampler",
     action="store_true",
     help="If set, enable WeightedRandomSampler for class imbalance."
+)
+parser.add_argument(
+    "--gradient_accumulation_steps",
+    type=int,
+    default=32,
+    help="Number of steps to accumulate gradients before updating optimizer. Default 32 (effective batch 128 with batch size 4)."
 )
 args = parser.parse_args()
 
@@ -171,7 +178,9 @@ optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 
 # 6. SCHEDULER
 num_epochs = 1000
-total_steps = num_epochs * len(train_loader)
+num_epochs = 1000
+steps_per_epoch = math.ceil(len(train_loader) / args.gradient_accumulation_steps)
+total_steps = num_epochs * steps_per_epoch
 scheduler = None
 scheduler_type = None
 
@@ -237,24 +246,27 @@ for epoch in range(start_epoch, num_epochs):
             processed_images.append(p_img.to(device))
             processed_targets.append({k: v.to(device) for k, v in p_tgt.items()})
             
-        optimizer.zero_grad()
-        
         with autocast(device_type='cuda', dtype=torch.float16, enabled=USE_AMP):
             loss_dict = model(processed_images, processed_targets)
             losses = sum(loss for loss in loss_dict.values())
+            # Normalize loss for gradient accumulation
+            losses = losses / args.gradient_accumulation_steps
 
-        writer.add_scalar("Losses/total_train", losses, global_step)
+        writer.add_scalar("Losses/total_train", losses * args.gradient_accumulation_steps, global_step)
         for k, v in loss_dict.items():
             writer.add_scalar(f"Losses/train_{k}", v, global_step)
 
         scaler.scale(losses).backward()
-        scaler.step(optimizer)
-        scaler.update()
 
-        if scheduler is not None and scheduler_type == 'cosine':
-            scheduler.step()
+        if (i + 1) % args.gradient_accumulation_steps == 0 or (i + 1) == len(train_loader):
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
 
-        loss_value = float(losses)
+            if scheduler is not None and scheduler_type == 'cosine':
+                scheduler.step()
+
+        loss_value = float(losses * args.gradient_accumulation_steps)
         total_loss += loss_value
         pbar.set_postfix({'loss': f"{loss_value:.4f}"})
         global_step += 1
