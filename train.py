@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.amp import GradScaler, autocast
@@ -22,6 +22,11 @@ parser.add_argument(
     choices=['sam3_rcnn', 'sam3_rcnn_v2', 'sam3_detr'],
     required=True,  # Make the flag mandatory
     help="The model architecture to use (sam3_rcnn, sam3_rcnn_v2, or sam3_detr)"
+)
+parser.add_argument(
+    "--merge-sets", 
+    action="store_true", 
+    help="Merge train and validation sets for training (full training)"
 )
 parser.add_argument(
     "--trainable_backbone",
@@ -104,40 +109,48 @@ print(f"Using device: {device}")
 sampler = None
 train_shuffle = True
 
-if args.use_weighted_sampler:
-    print("Using WeightedRandomSampler for class imbalance handling...")
-    df = pd.read_csv(CSV_PATH_TRAIN)
+# Define class weights outside the block so they can be reused if needed
+class_weights = {
+    'INFL': 1.00,
+    'NILM': 1.14,
+    'LSIL': 2.76,
+    'HSIL': 3.54,
+    'SCC':  4.03,
+    'ENDO': 6.53,
+    'ASCH': 13.80,
+    'ASCUS': 21.06
+}
 
-    # INFL is the most common, so it gets weight 1.0.
-    # ASCUS is the rarest, so it gets weight 21.0.
-    class_weights = {
-        'INFL': 1.00,
-        'NILM': 1.14,
-        'LSIL': 2.76,
-        'HSIL': 3.54,
-        'SCC':  4.03,
-        'ENDO': 6.53,
-        'ASCH': 13.80,
-        'ASCUS': 21.06
-    }
-
+def get_sample_weights_from_csv(csv_path):
+    """Calculate sample weights based on max class weight per image."""
+    df = pd.read_csv(csv_path)
     image_groups = df.groupby('image_filename')
     unique_images = df['image_filename'].unique()
-    sample_weights = []
+    weights = []
 
     for img_name in unique_images:
         classes_in_img = image_groups.get_group(img_name)['class_name'].values
-
         # The image weight is the MAXIMUM weight of any object inside it.
-        # This ensures that if an image has a rare class, it gets picked.
         max_weight = max([class_weights[c] for c in classes_in_img])
-        sample_weights.append(max_weight)
+        weights.append(max_weight)
+    
+    return torch.DoubleTensor(weights)
 
-    sample_weights = torch.DoubleTensor(sample_weights)
+if args.use_weighted_sampler:
+    print("Using WeightedRandomSampler for class imbalance handling...")
+    
+    if args.merge_sets:
+        print(" -> Merging train and validation weights for sampler...")
+        w_train = get_sample_weights_from_csv(CSV_PATH_TRAIN)
+        w_val = get_sample_weights_from_csv(CSV_PATH_VAL)
+        sample_weights = torch.cat((w_train, w_val))
+    else:
+        sample_weights = get_sample_weights_from_csv(CSV_PATH_TRAIN)
+
     sampler = WeightedRandomSampler(
         weights=sample_weights,
         num_samples=len(sample_weights),
-        replacement=True  # Allows resampling rare images multiple times per epoch
+        replacement=True
     )
     train_shuffle = False
 else:
@@ -146,11 +159,28 @@ else:
 # 3. DATASETS & DATALOADERS
 
 print("Initializing Datasets with SAM3 transforms (1008x1008)...")
-train_ds = BethesdaDataset(
-    csv_file=CSV_PATH_TRAIN, 
-    root_dir=TRAIN_PATH, 
-    transforms=get_train_transforms_v2()
-)
+
+if args.merge_sets:
+    print(" -> Merging train + validation datasets into training set...")
+    train_ds_1 = BethesdaDataset(
+        csv_file=CSV_PATH_TRAIN, 
+        root_dir=TRAIN_PATH, 
+        transforms=get_train_transforms_v2()
+    )
+    # Note: Use train transforms for the validation portion as well since it's now training data
+    train_ds_2 = BethesdaDataset(
+        csv_file=CSV_PATH_VAL, 
+        root_dir=VAL_PATH, 
+        transforms=get_train_transforms_v2()
+    )
+    train_ds = ConcatDataset([train_ds_1, train_ds_2])
+else:
+    train_ds = BethesdaDataset(
+        csv_file=CSV_PATH_TRAIN, 
+        root_dir=TRAIN_PATH, 
+        transforms=get_train_transforms_v2()
+    )
+
 test_ds = BethesdaDataset(
     csv_file=CSV_PATH_VAL, 
     root_dir=VAL_PATH, 
