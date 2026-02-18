@@ -9,6 +9,7 @@ from PIL import Image
 from tqdm import tqdm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
+from torchvision.models.detection.rpn import RPNHead
 
 # Import models
 try:
@@ -20,6 +21,7 @@ try:
         cell_dino_resize_longest_side_and_pad_square,
     )
     from data.transforms import get_valid_transforms
+    from utils.anchors import FPNLearnableAnchorGenerator
 except ImportError as e:
     raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
@@ -82,7 +84,15 @@ def main():
         default=0.0,
         help="Confidence threshold for predictions"
     )
+    parser.add_argument(
+        "--learn-anchors-multiple",
+        action="store_true",
+        help="Enable learned multi-scale anchors for sam3_rcnn_v2 checkpoints"
+    )
     args = parser.parse_args()
+
+    if args.learn_anchors_multiple and args.model != 'sam3_rcnn_v2':
+        raise ValueError("--learn-anchors-multiple is only supported with --model sam3_rcnn_v2.")
 
     # Device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -100,6 +110,15 @@ def main():
             model_name_or_path="facebook/sam3",
             num_classes_closed_set=num_classes - 1
         )
+        if args.learn_anchors_multiple:
+            print("Configuring learned multi-scale anchors for SAM3 RCNN v2...")
+            sizes = ((71, 78), (92, 104), (123, 135), (158, 168))
+            aspect_ratios = ((0.82, 1.0, 1.12),) * 4
+            model.rpn.anchor_generator = FPNLearnableAnchorGenerator(sizes, aspect_ratios)
+
+            num_anchors_per_location = len(sizes[0]) * len(aspect_ratios[0])
+            in_channels = model.backbone.out_channels
+            model.rpn.head = RPNHead(in_channels, num_anchors_per_location)
     elif args.model == 'sam3_detr':
         print("Loading DETR with SAM3 backbone...")
         model = get_sam3_detr(num_classes=num_classes)
