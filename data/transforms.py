@@ -56,6 +56,7 @@ def get_train_transforms_v2():
         ),
 
         A.GaussNoise(std_range=(0.075, 0.12), p=0.4),
+        A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.3), p=0.3),
 
         A.CoarseDropout(
           num_holes_range=(1, 8),
@@ -65,12 +66,9 @@ def get_train_transforms_v2():
           p=0.1
         ),
 
-        # RB and RC: Adjusts lighting and sharpness of your PAP smear images
-        A.RandomBrightnessContrast(
-            brightness_limit=0.12,
-            contrast_limit=0.12,
-            p=0.2
-        ),
+        # RB and RC: Adjusts lighting and sharpness of your PAP smear images or very subtle color jitter
+        A.RandomBrightnessContrast(brightness_limit=0.12, contrast_limit=0.12, p=0.2),
+        A.ColorJitter(brightness=0.15, contrast=(0.9, 1), saturation=(0.75, 0.8), hue=(-0.025, 0.025), p=0.25),
 
         # Normalize to 0-1 and convert to Tensor
         # Note: Mean/Std normalization is typically handled by the FasterRCNN model internal transform
