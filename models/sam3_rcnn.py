@@ -25,23 +25,19 @@ class SAM3Backbone(nn.Module):
             raise e
             
         # We only need the image encoding part essentially.
-        # Sam3Model's structure might differ slightly but usually has a vision_encoder.
         # Check if vision_encoder exists, otherwise inspect structure.
         if hasattr(self.model, "vision_encoder"):
              self.vision_encoder = self.model.vision_encoder
-        #elif hasattr(self.model, "image_encoder"):
-        #     self.vision_encoder = self.model.image_encoder
+        # Fallback: Use full model for forward pass
         else:
              print("Warning: Could not identify vision_encoder/image_encoder. Using full model for forward.")
              self.vision_encoder = self.model
         
-        # Freezing
+        # Freezing the visione ncoder
         for param in self.vision_encoder.parameters():
             param.requires_grad = False
             
-        # Try to detect hidden size from config
-        
-        self.hidden_size = 1024 # default fallback
+        self.hidden_size = 1024 
              
         self.out_channels = self.hidden_size
 
@@ -53,16 +49,11 @@ class SAM3Backbone(nn.Module):
         Returns:
             features (OrderedDict): {'0': feature_map}
         """
-        # DEBUG print
-        # print(f"DEBUG: Backbone input shape: {x.shape}")
 
         # Transformers SAM usually returns (B, SeqLen, Dim)
         outputs = self.vision_encoder(pixel_values=x)
         
-        if hasattr(outputs, "last_hidden_state"):
-             embeddings = outputs.last_hidden_state
-        else:
-             embeddings = outputs
+        embeddings = outputs.last_hidden_state
         
         # Current shape: (B, 5184, 1024) for 1008x1008 input
         # We need (B, C, H, W) -> (B, 1024, 72, 72)
@@ -80,12 +71,11 @@ def get_sam3_faster_rcnn(num_classes, sam_checkpoint="facebook/sam3"):
     """
     Creates a FasterRCNN model with a SAM backbone from Hugging Face.
     """
-    
-    # 1. Backbone
+
+    # Backbone
     backbone = SAM3Backbone(checkpoint=sam_checkpoint, out_channels=256)
     
-    # 2. Anchor Generator
-    # user request: 100x100 fixed
+    # Anchor Generator
     anchor_sizes = ((100,),) 
     aspect_ratios = ((1.0,),)
     
@@ -94,14 +84,14 @@ def get_sam3_faster_rcnn(num_classes, sam_checkpoint="facebook/sam3"):
         aspect_ratios=aspect_ratios
     )
     
-    # 3. ROI Pooler (Scale 1/16 typically for SAM)
+    # ROI Pooler
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=['0'],
         output_size=(7,7),
         sampling_ratio=2
     )
     
-    # 4. Assemble
+    # Assemble
     model = FasterRCNN(
         backbone,
         num_classes=num_classes,
@@ -110,7 +100,7 @@ def get_sam3_faster_rcnn(num_classes, sam_checkpoint="facebook/sam3"):
         box_nms_thresh=0.5,
         
         # SAM3 from config uses 1008 image size (patch size 14 * 72 = 1008)
-        # Previous 1024 caused shape mismatch in rotary embeddings.
+        # Previous 1024 caused shape mismatch in rotary embeddings
         # Size must be divisible by 7, 16 and 32
         min_size=1008, 
         max_size=1008,
