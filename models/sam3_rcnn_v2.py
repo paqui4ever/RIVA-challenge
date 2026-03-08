@@ -16,9 +16,7 @@ from transformers import Sam3Processor, Sam3Model
 _ORIGINAL_FASTRCNN_LOSS = roi_heads.fastrcnn_loss
 
 
-# -------------------------
 # Preprocess: SAM3-like square resize + pad (so FasterRCNN's internal resize becomes a no-op)
-# -------------------------
 @dataclass
 class Sam3ResizePadMeta:
     scale: float
@@ -73,9 +71,7 @@ def sam3_resize_longest_side_and_pad_square(
     return img, target, meta
 
 
-# -------------------------
 # Cut B backbone: SAM3 Vision (ViT + FPN) -> OrderedDict[str, Tensor] for FasterRCNN
-# -------------------------
 class Sam3Backbone(nn.Module):
     """
     Wraps Sam3Model so it behaves like a torchvision detection backbone.
@@ -98,7 +94,7 @@ class Sam3Backbone(nn.Module):
     @property
     def image_mean(self) -> List[float]:
         # Use the processor's normalization to keep SAM3-compatible inputs.
-        # (Works even if Meta changes the defaults in future checkpoints.)
+        # (Works even if Meta changes the defaults in future checkpoints)
         mean = getattr(self.processor.image_processor, "image_mean", None)
         if mean is None:
             # Fallback: ImageNet mean
@@ -130,19 +126,17 @@ class Sam3Backbone(nn.Module):
                 "Make sure you're using a Transformers version/checkpoint that supports SAM3 Vision FPN outputs."
             )
 
-        # fpn_feats is expected to be a tuple/list of [B,C,H,W] tensors (4 levels by default). :contentReference[oaicite:4]{index=4}
+        # fpn_feats is expected to be a tuple/list of [B,C,H,W] tensors (4 levels by default). 
         feats = OrderedDict((str(i), fpn_feats[i]) for i in range(len(fpn_feats)))
 
-        # Sanity: ensure channel dim matches out_channels
+        # Ensure channel dim matches out_channels
         for k, v in feats.items():
             if v.shape[1] != self.out_channels:
                 raise RuntimeError(f"Feature {k} has {v.shape[1]} channels, expected {self.out_channels}.")
         return feats
 
 
-# -------------------------
 # Build Faster R-CNN with SAM3 Cut B backbone (8 classes => num_classes=9 incl background)
-# -------------------------
 def build_sam3_fasterrcnn(
     model_name_or_path: str = "facebook/sam3",
     num_classes_closed_set: int = 8,
@@ -160,27 +154,25 @@ def build_sam3_fasterrcnn(
     
     anchor_generator = AnchorGenerator(
          # 4 FPN levels (featmap_names ["0","1","2","3"])
-         # Cover ~74–173px after resize (1008/1024)
-         # BASELINE
+         # BASELINE SIZES
          #sizes=((64, 80), (96, 112), (128, 160), (176, 192)),
          # FOURTH BEST SO FAR
          #sizes=((70, 80), (93, 110), (125, 150), (160, 180)),
-         # SECOND BEST SO FAR (MARGINAL DIFFERENCE WITH BEST)
-         # sizes=((70, 77), (93, 105), (125, 140), (160, 170)),
          # THIRD BEST SO FAR 
          # sizes=((72, 77), (96, 103), (130, 138), (163, 170)),
-         # BEST 
+         # SECOND BEST SO FAR (MARGINAL DIFFERENCE WITH BEST)
+         # sizes=((70, 77), (93, 105), (125, 140), (160, 170)),
+         # BEST SIZES
          sizes=((71, 78), (92, 104), (123, 135), (158, 168)),
          # Mostly square objects -> keep ratios tight around 1
-         # BASELINE
+         # BASELINE ASPECT RATIOS
          #aspect_ratios=((0.85, 1.0, 1.15),) * 4,
-         # BEST 
+         # BEST ASPECT RATIOS
          aspect_ratios=((0.82, 1.0, 1.12),) * 4,
     )
 
     roi_pooler = MultiScaleRoIAlign(
         featmap_names=featmap_names,
-        #output_size=14,
         output_size=11, # Tried with 9, 10, 11, 12. 11 is the best so far.
         sampling_ratio=3, # Tried with 2, 3 and 4. They are all very similar, keeping it at 3 for now.
     )
@@ -193,11 +185,6 @@ def build_sam3_fasterrcnn(
         num_classes=num_classes_closed_set + 1,  # +1 background
         rpn_anchor_generator=anchor_generator,
         box_roi_pool=roi_pooler,
-        #rpn_nms_thresh=0.75, # Increase a little bit to prevent merging two cells into one
-        # # Defines what the RPN considers a "positive" anchor to train on.
-        #box_fg_iou_thresh=0.40,  
-        # # Usually kept the same as box_fg_iou_thresh to define the boundary 
-        # # between "background" and "foreground".
         # Make FasterRCNN's internal resize a no-op (we pre-pad to target_size x target_size)
         min_size=target_size,
         max_size=target_size,
@@ -214,41 +201,3 @@ def build_sam3_fasterrcnn(
     model.transform.size_divisible = 14
 
     return model
-
-
-# -------------------------
-# Example usage (training step)
-# -------------------------
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = build_sam3_fasterrcnn("facebook/sam3", num_classes_closed_set=8, trainable_backbone=True).to(device)
-
-    # Dummy batch: list[Tensor] images + list[Dict] targets (torchvision detection convention)
-    # Assume you load an image as float tensor [3,H,W] in [0,1] and boxes in xyxy pixel coords.
-    images: List[torch.Tensor] = [torch.rand(3, 720, 1280), torch.rand(3, 900, 900)]
-    targets: List[Dict[str, torch.Tensor]] = [
-        {"boxes": torch.tensor([[100.0, 120.0, 400.0, 500.0]]), "labels": torch.tensor([1])},
-        {"boxes": torch.tensor([[50.0, 60.0, 200.0, 240.0]]), "labels": torch.tensor([3])},
-    ]
-
-    # Preprocess each image/target to SAM3 expected square size
-    processed_images: List[torch.Tensor] = []
-    processed_targets: List[Dict[str, torch.Tensor]] = []
-    target_size = model.backbone.target_size  # 1008 by default
-
-    for img, tgt in zip(images, targets):
-        img, tgt, _ = sam3_resize_longest_side_and_pad_square(img, tgt, target_size=target_size)
-        processed_images.append(img.to(device))
-        processed_targets.append({k: v.to(device) for k, v in tgt.items()})
-
-    model.train()
-    losses = model(processed_images, processed_targets)
-    loss = sum(losses.values())
-    loss.backward()
-
-    # Inference
-    model.eval()
-    with torch.no_grad():
-        detections = model(processed_images)
-        # detections: list of dicts with boxes, labels, scores
-        print(detections[0].keys())
