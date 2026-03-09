@@ -2,22 +2,10 @@ import os
 import sys
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import torch
-from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.amp import GradScaler, autocast
-from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
-from torchvision.models.detection.rpn import RPNHead
-from tqdm import tqdm
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from torch.utils.tensorboard import SummaryWriter
 import argparse
 
 # Parser for choosing the model and ablations
-parser = argparse.ArgumentParser(description="Train SAM3 Faster R-CNN")
+parser = argparse.ArgumentParser(description="Training script for the SAM3 + Faster R-CNN models")
 parser.add_argument(
     "--model", 
     type=str, 
@@ -62,7 +50,27 @@ parser.add_argument("--learn-anchors-multiple", action="store_true", help="Learn
 parser.add_argument("--dataset-path", type=str, default="/local_data/RIVA", help="Path to the dataset")
 parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
 parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs")
+
+# Special intercept for 'help' without dashes 
+if len(sys.argv) == 2 and sys.argv[1] == "help":
+    parser.print_help()
+    sys.exit(0)
+
 args = parser.parse_args()
+
+import numpy as np
+
+import pandas as pd
+import torch
+from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.amp import GradScaler, autocast
+from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
+from torchvision.models.detection.rpn import RPNHead
+from tqdm import tqdm
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torch.utils.tensorboard import SummaryWriter
 
 # Checkpointing settings
 CHECKPOINT_DIR = '/local_data/RIVA/checkpoints'

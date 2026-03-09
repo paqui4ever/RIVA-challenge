@@ -1,31 +1,9 @@
-import argparse
+import sys
 import os
-
-import math
-import numpy as np
-import pandas as pd
-import torch
-from torch.amp import GradScaler, autocast
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.utils.data import DataLoader, WeightedRandomSampler
-from torch.utils.tensorboard import SummaryWriter
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from tqdm import tqdm
-
-# Imports
-try:
-    from data.dataset import BethesdaDataset
-    from data.transforms import get_train_transforms_v2, get_valid_transforms
-    from models.cell_DINO_rcnn_v2 import (
-        build_cell_dino_fasterrcnn,
-        cell_dino_resize_longest_side_and_pad_square
-    )
-except ImportError as e:
-    raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
+import argparse
 
 # Parser
-parser = argparse.ArgumentParser(description="Train Cell-DINO Faster R-CNN")
+parser = argparse.ArgumentParser(description="Training script for the Cell-DINO Faster R-CNN model")
 parser.add_argument(
     "--pretrained_checkpoint_path", 
     type=str, 
@@ -58,7 +36,35 @@ parser.add_argument(
     default=32,
     help="Number of steps to accumulate gradients before updating optimizer. Default 32 (effective batch 128 with batch size 4)."
 )
+
+if len(sys.argv) == 2 and sys.argv[1] == "help":
+    parser.print_help()
+    sys.exit(0)
+
 args = parser.parse_args()
+
+import math
+import numpy as np
+import pandas as pd
+import torch
+from torch.amp import GradScaler, autocast
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from tqdm import tqdm
+
+# Imports
+try:
+    from data.dataset import BethesdaDataset
+    from data.transforms import get_train_transforms_v2, get_valid_transforms
+    from models.cell_DINO_rcnn_v2 import (
+        build_cell_dino_fasterrcnn,
+        cell_dino_resize_longest_side_and_pad_square
+    )
+except ImportError as e:
+    raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
 
 if args.use_cosine_annealing and args.use_reduce_on_plateau:
     raise ValueError("Choose only one LR scheduler: --use_cosine_annealing or --use_reduce_on_plateau")

@@ -7,28 +7,12 @@ This model (Cut A architecture):
   - Uses Hungarian matching + set-based loss (CE + L1 + GIoU)
 """
 
+import sys
 import os
 import argparse
-import torch
-from torch.utils.data import DataLoader
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.amp import GradScaler, autocast
-from tqdm import tqdm
-from torchmetrics.detection.mean_ap import MeanAveragePrecision
-from torch.utils.tensorboard import SummaryWriter
 
-from transformers import Sam3Processor
-
-from data.transforms import get_train_transforms_DETR_v2, get_valid_transforms_DETR_v2
-from data.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn, postprocess_and_unletterbox
-from models.sam3_DETR_v2 import Sam3ForClosedSetDetection, box_cxcywh_to_xyxy
-
-
-# ----------------------------
 # Argument Parser
-# ----------------------------
-parser = argparse.ArgumentParser(description="Train Sam3ForClosedSetDetection (SAM3 + DETR v2)")
+parser = argparse.ArgumentParser(description="Training script for the SAM3 + DETR v2 model")
 parser.add_argument(
     "--freeze_sam3",
     action="store_true",
@@ -100,11 +84,29 @@ parser.add_argument(
     default=1,
     help="Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)"
 )
+
+if len(sys.argv) == 2 and sys.argv[1] == "help":
+    parser.print_help()
+    sys.exit(0)
+
 args = parser.parse_args()
 
-# ----------------------------
+import torch
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp import GradScaler, autocast
+from tqdm import tqdm
+from torchmetrics.detection.mean_ap import MeanAveragePrecision
+from torch.utils.tensorboard import SummaryWriter
+
+from transformers import Sam3Processor
+
+from data.transforms import get_train_transforms_DETR_v2, get_valid_transforms_DETR_v2
+from utils.detr_v2_utils import BethesdaDatasetForSam3DETR, make_detr_collate_fn, postprocess_and_unletterbox,  box_cxcywh_to_xyxy
+from models.sam3_DETR_v2 import Sam3ForClosedSetDetection
+
 # Configuration
-# ----------------------------
 CHECKPOINT_DIR = args.checkpoint_dir
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
@@ -124,15 +126,11 @@ VAL_PATH = '/local_data/RIVA/images/images/val'
 SAM3_CHECKPOINT = "facebook/sam3"
 NUM_CLASSES = 8  # 8 Bethesda classes (model adds +1 for no-object internally)
 
-# ----------------------------
 # Device Setup
-# ----------------------------
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# ----------------------------
 # Initialize Sam3Processor and Transforms
-# ----------------------------
 print("Loading Sam3Processor...")
 processor = Sam3Processor.from_pretrained(SAM3_CHECKPOINT)
 
@@ -141,9 +139,7 @@ TARGET_SIZE = 1008
 train_transforms = get_train_transforms_DETR_v2(processor, size=TARGET_SIZE)
 val_transforms = get_valid_transforms_DETR_v2(processor, size=TARGET_SIZE)
 
-# ----------------------------
 # Initialize Datasets
-# ----------------------------
 print("Initializing Datasets for Sam3ForClosedSetDetection...")
 train_ds = BethesdaDatasetForSam3DETR(
     csv_file=CSV_PATH_TRAIN,
@@ -156,9 +152,7 @@ val_ds = BethesdaDatasetForSam3DETR(
     transforms=val_transforms
 )
 
-# ----------------------------
 # Validate label ranges (CRITICAL for DETR)
-# ----------------------------
 print(f"\n{'='*60}")
 print("VALIDATING LABEL RANGES (DETR expects 0-indexed labels)")
 print(f"{'='*60}")
@@ -198,9 +192,7 @@ else:
 
 print(f"{'='*60}\n")
 
-# ----------------------------
 # Initialize DataLoaders
-# ----------------------------
 collate_fn = make_detr_collate_fn(processor, target_size=TARGET_SIZE)
 
 BATCH_SIZE = args.batch_size
@@ -222,9 +214,7 @@ val_loader = DataLoader(
     pin_memory=True
 )
 
-# ----------------------------
 # Model Initialization
-# ----------------------------
 print(f"Loading Sam3ForClosedSetDetection (freeze_sam3={args.freeze_sam3})...")
 model = (
     Sam3ForClosedSetDetection(
@@ -247,9 +237,7 @@ model = (
     .to(device)
 )
 
-# ----------------------------
 # Optimizer with Differential Learning Rates
-# ----------------------------
 if args.freeze_sam3:
     # Only train classification head
     optimizer = AdamW(model.class_embed.parameters(), lr=args.lr_head, weight_decay=1e-4)
@@ -260,9 +248,7 @@ else:
         {"params": model.class_embed.parameters(), "lr": args.lr_head},
     ], weight_decay=1e-4)
 
-# ----------------------------
 # Learning Rate Scheduler
-# ----------------------------
 num_epochs = args.epochs
 # Account for gradient accumulation: scheduler steps only when optimizer steps
 num_batches_per_epoch = len(train_loader)
@@ -270,14 +256,10 @@ optimizer_steps_per_epoch = (num_batches_per_epoch + args.gradient_accumulation_
 total_steps = num_epochs * optimizer_steps_per_epoch
 scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
 
-# ----------------------------
 # Mixed Precision Scaler
-# ----------------------------
 scaler = GradScaler(enabled=USE_AMP)
 
-# ----------------------------
 # Resume from Checkpoint
-# ----------------------------
 start_epoch = 0
 global_step = 0
 best_map = 0.0
@@ -294,9 +276,7 @@ if args.resume and os.path.isfile(args.resume):
     best_map = checkpoint.get('best_map', 0.0)
     print(f"Resumed from epoch {start_epoch}, global_step {global_step}, best_map {best_map:.4f}")
 
-# ----------------------------
 # Training Loop
-# ----------------------------
 ACCUM_STEPS = args.gradient_accumulation_steps
 EFFECTIVE_BATCH_SIZE = BATCH_SIZE * ACCUM_STEPS
 
@@ -313,7 +293,7 @@ for epoch in range(start_epoch, num_epochs):
     print(f"Epoch {epoch+1}/{num_epochs}")
     print(f"{'='*60}")
 
-    # --- TRAINING ---
+    # TRAINING 
     model.train()
     total_loss = 0.0
     epoch_losses = {"loss_ce": 0.0, "loss_bbox": 0.0, "loss_giou": 0.0}
@@ -374,7 +354,7 @@ for epoch in range(start_epoch, num_epochs):
     for k, v in epoch_losses.items():
         print(f"  {k}: {v / len(train_loader):.4f}")
 
-    # --- VALIDATION ---
+    # VALIDATION 
     print("\nValidating...")
     model.eval()
     metric = MeanAveragePrecision(iou_type="bbox", box_format="xyxy", class_metrics=True)
@@ -398,7 +378,7 @@ for epoch in range(start_epoch, num_epochs):
                     max_detections=100
                 )
 
-            # --- DEBUG CHECK ---
+            # DEBUG CHECK 
             for b in range(len(predictions)):
                 boxes = predictions[b]['boxes'].cpu()
                 if boxes.numel() == 0: continue
@@ -409,7 +389,6 @@ for epoch in range(start_epoch, num_epochs):
                     print(f"DEBUG: Batch {b} - Boxes are definitely cx, cy, w, h!")
                     print(f"Sample box: {boxes[0].tolist()}")
                     break
-            # -------------------
 
             # Convert targets to absolute coordinates for metric computation
             preds_cpu = []
@@ -480,7 +459,7 @@ for epoch in range(start_epoch, num_epochs):
                 class_str = f"{class_map:.4f}"
             print(f"    Class {class_idx}: {class_str}")
 
-    # --- CHECKPOINTING ---
+    # CHECKPOINTING
     checkpoint_dict = {
         'epoch': epoch,
         'global_step': global_step,
