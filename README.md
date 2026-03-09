@@ -10,28 +10,35 @@ This repository is our solution to the [RIVA Cervical Cytology Challenge](https:
 
 This project has the objective of finding the best architecture in order to both detect and classify cells of the Bethesda categories (NILM, ASCUS, LSIL, HSIL, ASC-H, SCC, INFL, ENDO).
 
-The first model architecture that we proposed consisted of using [SAM3](https://arxiv.org/pdf/2511.16719)'s vision encoder as a backbone of [Faster-RCNN](https://arxiv.org/pdf/1506.01497). It  is a combination of a SOTA model (SAM3) and a well established one (Faster-RCNN).
+The first model architecture that we proposed consisted of using [SAM3](https://arxiv.org/pdf/2511.16719)'s vision encoder as a backbone of [Faster-RCNN](https://arxiv.org/pdf/1506.01497). It  is a combination of a SOTA model (SAM3) and a well established one (Faster-RCNN). This one gave us the best performance of all three proposed architectures.
 
-The second model architecture, and the current one, also uses SAM3's vision encoder but this time as a backbone of [DETR](https://arxiv.org/pdf/2005.12872). This version of the model is much newer and takes advantage of the current Transfomer based architectures. 
+The second model architecture, also uses SAM3's vision encoder but this time as a backbone of [DETR](https://arxiv.org/pdf/2005.12872). This version of the model is much newer and takes advantage of the current Transfomer based architectures. 
 
-The third model architecture, and the one we will begin experimenting with, uses [Cell-DINO](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1013828) as a backbone of Faster-RCNN. This model will potentially profit from the pretraining of the backbone on cell images, leading to a stronger performance on the RIVA dataset.
+The third model architecture, uses [Cell-DINO](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1013828) as a backbone of Faster-RCNN. We hypthesized that this model would profit from the pretraining of the backbone on cell images, leading to a stronger performance on the RIVA dataset. In our case it did not end up being the case. Probably due a lack of volume of data and difficult data distribution.
 
-Our latest improvement consists of using [LoRA](https://arxiv.org/pdf/2106.09685) finetuning on the Cell-DINO + Faster-RCNN and SAM3 + DETR models.
+This last two models underperformed compared to the first one, despite this being the case, the code from them is available.
 
-We are also currently experimenting with [learnable anchors](https://arxiv.org/pdf/1812.00469), [focal loss](https://arxiv.org/pdf/1708.02002) and [weighted random sampling](https://www.sciencedirect.com/science/article/pii/S002001900500298X).
+We experimented with [LoRA](https://arxiv.org/pdf/2106.09685) finetuning on the Cell-DINO + Faster-RCNN and SAM3 + DETR models. We also experimented with [learnable anchors](https://arxiv.org/pdf/1812.00469), [focal loss](https://arxiv.org/pdf/1708.02002) and [weighted random sampling](https://www.sciencedirect.com/science/article/pii/S002001900500298X) as ablations to our SAM3 + Faster-RCNN model.
 
 > Training the LoRA models is currently not supported.
+
+## 🎖 Results
+
+Our best score on the final test set was a **mAP of 0.12064** while our best score on the pre-eliminary phase test set was a **mAP of 0.15705**. That placed us on 11th place and 21th place respectively. The model that gave us those results was the revisited (v2) SAM3 + Faster-RCNN with out best anchor generator configuration. All other ablations gave us an inferior performance. 
 
 ## 🚀 Quick start
 Start by downloading the projects dependencies by running
 ```cli
 pip install -r requirements.txt
 ```
->Added one more dependency, don't forget to install it to prevent ImportError!
 
-To access the challenges training, validating and testing datasets with their respective annotations simply run ensuring you are already participating in the challenge.
+To access the challenges training, validating and testing datasets with their respective annotations simply run ensuring you are already participating in the challenge. For the pre-eliminary phase dataset run:
 ```cli
 kaggle competitions download -c riva-cervical-cytology-challenge-isbi-2026
+```
+And for the final phase dataset (it only differs on the test set) run:
+```cli
+kaggle competitions download -c riva-cervical-cytology-challenge-track-a-isbi-final-evaluation
 ```
 
 ## 🦾 Training
@@ -39,7 +46,7 @@ First choose which model you want to train from the ones that are in "models/" a
 ```cli
 python train.py --model <MODEL_NAME>
 ```
-The only valid model names are: 
+The only valid model names for this script are: 
 - **sam3_rcnn** for the SAM3 + Faster-RCNN 
 - **sam3_detr** for the SAM3 + DETR
 - **sam3_rcnn_v2** for the *revisited* SAM3 + Faster-RCNN
@@ -50,16 +57,6 @@ To train the revisited SAM3 + DETR run:
 ```cli
 python train_sam3_detr_v2.py
 ```
-For tuning the hyperparameters, the training script takes the following arguments:
-- `--freeze_sam3`: If set, freeze the SAM3 backbone (only train the classification head)
-- `--checkpoint_dir`: Directory to save checkpoints
-- `--resume`: Path to checkpoint to resume training from
-- `--batch_size`: Batch size for training (default: 8, adjust based on GPU memory)
-- `--epochs`: Number of training epochs
-- `--lr_backbone`: Learning rate for SAM3 backbone
-- `--lr_head`: Learning rate for classification head
-- `--score_thresh`: Score threshold for inference during validation
-- `--gradient_accumulation_steps`: Number of gradient accumulation steps (effective batch size = batch_size * gradient_accumulation_steps)
 
 Before training the Cell-DINO model, you must obtain the pretrained weights by completing the requested information in the following link: https://ai.meta.com/resources/models-and-libraries/cell-dino-downloads/.
 After that, you should receive an email with the url's to the weights. The one to use is
@@ -69,17 +66,25 @@ The training script for Cell-DINO + Faster-RCNN is much simpler. It can be run w
 ```cli
 python train_cell_dino.py
 ```
-And it only has the following arguments:
-- `--pretrained_checkpoint_path`: Path to Cell-DINO high-res weights (.pth file). Optional if loading from URL.
-- `--trainable_backbone`: If set, unfreeze backbone (fine-tuning). Default is Frozen.
-
 Provide the pretrained weights path to the script for easier use.
+
+> In case of not knowing how to use the training scripts, you can always run `python <SCRIPT_NAME>.py --help` to see the available arguments and a little explanation of what they do.
 
 ## 📖 Testing
 To run the functionality tests run:
 ```
-python tests/
+pytest tests/
 ```
+To run the overfit script run:
+```cli
+python tests/overfit_tests/overfit_models.py --model <MODEL_NAME>
+```
+
+Supported models are: 'cell_dino', 'cell_dino_lora', 'sam3', 'sam3_detr_v2' ('sam3' is the non revisited SAM3 + Faster-RCNN model).
+
+Images like the following will be saved (every 10 epochs by default) to overfit_visualizations_<MODEL_NAME>. In red the predicted bounding box and in green, the ground truth.
+
+![alt text](./assets/overfit_example_image.png)
 
 ## 📁 Generating predictions
 
@@ -87,9 +92,11 @@ To generate predictions over the test dataset run:
 ```cli
 python predict.py --model <MODEL_NAME>
 ```
+Supported models are: 'sam3_rcnn', 'sam3_rcnn_v2', 'sam3_detr', 'cell_dino_rcnn_v2', 'cell_dino'.
+
 This will generate a submission.csv file in the "results/" directory.
 
-> Predictions for the revisited and LoRA models are currently not fully supported. The script must be revisited before they can be used.
+> Predictions for the LoRA models are currently not fully supported. The script must be revisited before they can be used.
 
 ##  📜 References
 
@@ -176,5 +183,21 @@ url = {https://www.sciencedirect.com/science/article/pii/S002001900500298X},
 author = {Pavlos S. Efraimidis and Paul G. Spirakis},
 keywords = {Weighted random sampling, Reservoir sampling, Randomized algorithms, Data streams, Parallel algorithms},
 abstract = {In this work, a new algorithm for drawing a weighted random sample of size m from a population of n weighted items, where m⩽n, is presented. The algorithm can generate a weighted random sample in one-pass over unknown populations.}
+}
+
+@misc{riva-cervical-cytology-challenge-isbi-2026,
+    author = {Emmanuel Iarussi and Manuel Andrade},
+    title = {RIVA Cervical Cytology Challenge - Track A (ISBI)},
+    year = {2025},
+    howpublished = {\url{https://kaggle.com/competitions/riva-cervical-cytology-challenge-isbi-2026}},
+    note = {Kaggle}
+}
+
+@misc{riva-cervical-cytology-challenge-track-a-isbi-final-evaluation,
+    author = {Emmanuel Iarussi and Manuel Andrade},
+    title = {RIVA CCC - Track A (ISBI) - FINAL EVALUATION},
+    year = {2026},
+    howpublished = {\url{https://kaggle.com/competitions/riva-cervical-cytology-challenge-track-a-isbi-final-evaluation}},
+    note = {Kaggle}
 }
 ```
