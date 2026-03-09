@@ -1,6 +1,4 @@
 """
-Secrets configuration for accessing HuggingFace models.
-
 This module provides secure access to API tokens without hardcoding them.
 Tokens are loaded from environment variables or a local .env file.
 
@@ -101,5 +99,5 @@ def get_sam3_processor(model_name: str = "facebook/sam3"):
 
 
 def clear_processor_cache():
-    """Clear the cached Sam3Processor (useful for testing)."""
+    """Clear the cached Sam3Processor."""
     get_sam3_processor.cache_clear()
