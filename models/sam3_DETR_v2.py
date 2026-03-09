@@ -10,52 +10,9 @@ from torchvision.ops import generalized_box_iou
 from scipy.optimize import linear_sum_assignment
 
 from transformers import Sam3Model, Sam3Processor
+from utils.detr_v2_utils import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh, box_xyxy_clamp
 
-
-# ----------------------------
-# Box helpers (xyxy throughout)
-# ----------------------------
-def box_cxcywh_to_xyxy(boxes: Tensor) -> Tensor:
-    """
-    Convert boxes from center format (cx, cy, w, h) to corner format (x1, y1, x2, y2).
-    DETR-family models output cxcywh normalized boxes.
-    """
-    cx, cy, w, h = boxes.unbind(-1)
-    x1 = cx - 0.5 * w
-    y1 = cy - 0.5 * h
-    x2 = cx + 0.5 * w
-    y2 = cy + 0.5 * h
-    return torch.stack([x1, y1, x2, y2], dim=-1)
-
-
-def box_xyxy_to_cxcywh(boxes: Tensor) -> Tensor:
-    """
-    Convert boxes from corner format (x1, y1, x2, y2) to center format (cx, cy, w, h).
-    """
-    x1, y1, x2, y2 = boxes.unbind(-1)
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-    w = x2 - x1
-    h = y2 - y1
-    return torch.stack([cx, cy, w, h], dim=-1)
-
-
-def box_xyxy_clamp(boxes: Tensor) -> Tensor:
-    # boxes: (..., 4)
-    x1, y1, x2, y2 = boxes.unbind(-1)
-    x1 = x1.clamp(0.0, 1.0)
-    y1 = y1.clamp(0.0, 1.0)
-    x2 = x2.clamp(0.0, 1.0)
-    y2 = y2.clamp(0.0, 1.0)
-    # Ensure proper ordering
-    x1_, x2_ = torch.min(x1, x2), torch.max(x1, x2)
-    y1_, y2_ = torch.min(y1, y2), torch.max(y1, y2)
-    return torch.stack([x1_, y1_, x2_, y2_], dim=-1)
-
-
-# ----------------------------
 # Hungarian matcher (DETR-style)
-# ----------------------------
 class HungarianMatcher(nn.Module):
     """
     Computes an assignment between targets and predictions for each batch element.
@@ -127,10 +84,7 @@ class HungarianMatcher(nn.Module):
 
         return indices
 
-
-# ----------------------------
 # SetCriterion (losses)
-# ----------------------------
 class SetCriterion(nn.Module):
     def __init__(
         self,
@@ -262,10 +216,7 @@ class SetCriterion(nn.Module):
         losses["loss_total"] = total
         return losses
 
-
-# ----------------------------
 # Cut A Model: SAM3 + closed-set head
-# ----------------------------
 class Sam3ForClosedSetDetection(nn.Module):
     """
     Cut A:
@@ -397,9 +348,7 @@ class Sam3ForClosedSetDetection(nn.Module):
         return results
 
 
-# ----------------------------
 # Processor + collate_fn example
-# ----------------------------
 def make_sam3_collate_fn(processor, prompt="cells"):
     def collate(batch):
         images, targets = zip(*batch)
@@ -427,47 +376,3 @@ def make_sam3_collate_fn(processor, prompt="cells"):
 
         return pixel_values, input_ids, attention_mask, norm_targets, orig_sizes
     return collate
-
-
-# ----------------------------
-# Minimal training step sketch
-# ----------------------------
-def train_one_step(model, batch, device="cuda"):
-    pixel_values, targets, _orig_sizes = batch
-    pixel_values = pixel_values.to(device)
-    targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
-
-    out = model(pixel_values=pixel_values, targets=targets)
-    losses = out["losses"]
-    loss = losses["loss_total"]
-
-    return loss, losses
-
-
-if __name__ == "__main__":
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    processor = Sam3Processor.from_pretrained("facebook/sam3")
-
-    model = (
-        Sam3ForClosedSetDetection("facebook/sam3", num_classes=8, freeze_sam3=False)
-        .build_criterion()
-        .to(device)
-    )
-
-    # Example optimizer (you'll likely want smaller LR for SAM3, bigger for class head)
-    optimizer = torch.optim.AdamW([
-        {"params": model.sam3.parameters(), "lr": 1e-5},
-        {"params": model.class_embed.parameters(), "lr": 1e-4},
-    ], weight_decay=1e-4)
-
-    # In your DataLoader:
-    # collate_fn = make_sam3_collate_fn(processor)
-    # loader = DataLoader(dataset, batch_size=..., collate_fn=collate_fn, ...)
-
-    # Then:
-    # for batch in loader:
-    #     loss, losses = train_one_step(model, batch, device=device)
-    #     optimizer.zero_grad()
-    #     loss.backward()
-    #     optimizer.step()
