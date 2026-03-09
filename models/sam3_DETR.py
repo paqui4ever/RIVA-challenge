@@ -60,46 +60,15 @@ class DetrBackboneAdapter(nn.Module):
     def __init__(self, backbone, hidden_dim=256):
         super().__init__()
         self.backbone = backbone
-        # 1. Mirror key attributes required by DETR
+        # Mirror key attributes required by DETR
         self.out_channels = backbone.out_channels
         self.num_channels = backbone.out_channels # Some implementations check this name
 
         # Position embedding for DETR (sinusoidal)
         self.hidden_dim = hidden_dim
         self.position_embedding = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
-
-        # # --- ROBUST CHANNEL DETECTION ---
-        # # Instead of trusting backbone.out_channels (which seems to be reporting 2048 erroneously),
-        # # we run a cheap dummy pass to see what the tensor actually looks like.
-        # with torch.no_grad():
-        #     dummy_input = torch.zeros(1, 3, 1008, 1008)
-        #     # We assume the backbone might live on CPU for now; if on GPU, move dummy.
-        #     if next(backbone.parameters()).is_cuda:
-        #         dummy_input = dummy_input.cuda()
-                
-        #     dummy_out = backbone(dummy_input)
-        #     if isinstance(dummy_out, dict):
-        #         dummy_feat = list(dummy_out.values())[-1]
-        #     else:
-        #         dummy_feat = dummy_out
-                
-        #     detected_channels = dummy_feat.shape[1]
-            
-        # self.out_channels = detected_channels
-        # self.num_channels = detected_channels 
-        # print(f"DetrBackboneAdapter: Detected actual output channels: {self.out_channels}")
-
         
     def forward(self, pixel_values, pixel_mask=None):
-        # 1. Get raw features from the pure backbone
-        # We resize to 1008x1008 to ensure stability, as 1024 causes rotary embedding mismatches.
-        # if pixel_values.shape[-2:] != (1008, 1008):
-        #     pixel_values = torch.nn.functional.interpolate(
-        #         pixel_values,
-        #         size=(1008, 1008),
-        #         mode='bilinear',
-        #         align_corners=False
-        #     )
             
         features_dict = self.backbone(pixel_values)
         
@@ -125,7 +94,7 @@ class DetrBackboneAdapter(nn.Module):
                 mode="nearest"
             ).to(torch.bool)[0]
 
-        # 4. Generate position embeddings
+        # Generate position embeddings
         # The position embedding expects a boolean mask where True = masked (padding)
         pos_embed = self.position_embedding(pixel_mask)
 
@@ -138,13 +107,19 @@ class DetrBackboneAdapter(nn.Module):
 
 
 def get_sam3_detr(num_classes, sam_checkpoint="facebook/sam3"):
+    """ Returns DETR model with SAM3 backbone """
+
+    # Loading the DETR config 
     config = DetrConfig.from_pretrained("facebook/detr-resnet-50")
     config.num_labels = num_classes
 
+    # Setting up the backbone
     pure_backbone = SAM3Backbone(checkpoint=sam_checkpoint, out_channels=256)
 
+    # Adapting the backbone
     detr_compatible_backbone = DetrBackboneAdapter(pure_backbone)
     
+    # Assembling
     model = DetrForObjectDetection.from_pretrained(
         "facebook/detr-resnet-50",
         num_labels=num_classes,
@@ -154,8 +129,7 @@ def get_sam3_detr(num_classes, sam_checkpoint="facebook/sam3"):
     # Replace the feature extractor
     model.model.backbone = detr_compatible_backbone
 
-    # 4. PROJECTION LAYER REPLACEMENT 
-    # NOTE: HuggingFace DETR uses 'input_projection', not 'input_proj'
+    # Replacing projection layer
     print(f"Replacing Input Projection: {detr_compatible_backbone.out_channels} -> {model.config.d_model}")
     model.model.input_projection = nn.Conv2d(
         in_channels=detr_compatible_backbone.out_channels,
