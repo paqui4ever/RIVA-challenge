@@ -6,22 +6,22 @@ def softmax_focal_loss(logits, labels, gamma=2.0, alpha=None, reduction='mean'):
     Multi-class Focal Loss formulation:
     FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
     """
-    # 1. Calculate probabilities (Softmax)
+    # Calculate probabilities (Softmax)
     probs = F.softmax(logits, dim=1)
     
-    # 2. Gather the probabilities of the correct classes (p_t)
+    # Gather the probabilities of the correct classes (p_t)
     # labels.view(-1, 1) reshapes to (N, 1) to gather along dim 1
     p_t = probs.gather(1, labels.view(-1, 1))
     
-    # 3. Calculate the focusing factor (1 - p_t)^gamma
+    # Calculate the focusing factor (1 - p_t)^gamma
     gamma_factor = (1 - p_t) ** gamma
     
-    # 4. Calculate Cross Entropy: -log(p_t)
+    # Calculate Cross Entropy: -log(p_t)
     # We use log_softmax for numerical stability instead of log(probs)
     log_p_t = F.log_softmax(logits, dim=1).gather(1, labels.view(-1, 1))
     ce_loss = -log_p_t
     
-    # 5. Apply Alpha (Class Weights) if provided
+    # Apply Alpha (Class Weights) if provided
     if alpha is not None:
         # alpha is a tensor of shape [num_classes]
         # We select the alpha corresponding to the correct label
@@ -53,7 +53,7 @@ def custom_faster_rcnn_loss(class_logits, box_regression, labels, regression_tar
         classification_loss (Tensor)
         box_loss (Tensor)
     """
-    # --- HERE IS THE CHANGE ---
+
     # We replace F.cross_entropy with our softmax_focal_loss
 
     # concatenating the labels and regression_targets
@@ -63,10 +63,7 @@ def custom_faster_rcnn_loss(class_logits, box_regression, labels, regression_tar
     if isinstance(regression_targets, (list, tuple)):
         regression_targets = torch.cat(regression_targets, dim=0)
 
-    
     # Define your class weights (Move to GPU inside the function or global scope)
-    # Assuming you have 8 classes + 1 background
-    # (Use the weights we calculated earlier)
     alpha = torch.tensor([
          1.00,  # Background (0)
          1.14,  # NILM
@@ -82,13 +79,12 @@ def custom_faster_rcnn_loss(class_logits, box_regression, labels, regression_tar
     classification_loss = softmax_focal_loss(
         class_logits, 
         labels, 
-        gamma=2.0,       # 2.0 is standard for Focal Loss
-        alpha=alpha,     # Optional: Remove if you want pure Focal Loss without weights
+        gamma=2.0,       # standard for Focal Loss
+        alpha=alpha,     # should be remove if pure Focal Loss without weights is wanted
         reduction='mean'
     )
-    # --------------------------
 
-    # Box regression loss (Standard implementation - unchanged)
+    # Box regression loss (Standard implementation)
     sampled_pos_inds_subset = torch.where(labels > 0)[0]
     labels_pos = labels[sampled_pos_inds_subset]
     N, num_classes = class_logits.shape
