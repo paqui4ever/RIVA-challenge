@@ -62,7 +62,6 @@ class BethesdaDataset(Dataset):
         labels = []
 
         for _, row in records.iterrows():
-            #print(f"Imagen: {image_id} | Tamaño: {W}x{H} | Caja X: {row['x']}")
             x_center, y_center = row['x'] , row['y']
             width, height = row['width'], row['height']
             class_id = row['class'] + 1
@@ -96,36 +95,27 @@ class BethesdaDataset(Dataset):
             labels = labels_f
 
         if len(boxes) > 0:
-            # Si hay cajas, convertimos a tensor normal
+            # If theres boxes, we need to convert them to tensors
             boxes = torch.as_tensor(boxes, dtype=torch.float32)
             
-            # Safety check: asegúrate que sea (N, 4) y no (N, 4, 1) o algo raro
+            # Safety check: ensure correct shape (N, 4)
             if boxes.ndim == 1 and len(boxes) == 4:
-                boxes = boxes.unsqueeze(0) # Caso de una sola caja plana
+                boxes = boxes.unsqueeze(0) 
                  
             labels = torch.as_tensor(labels, dtype=torch.int64)
             
-            # Calcular area e iscrowd (requerido por COCO eval)
+            # Calculate area and iscrowd
             area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
             iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
             
         else:
-            # CASO CERO CAJAS: Esto es lo que rompe tu training loop
-            # Debemos crear un tensor vacío pero con la DIMENSIÓN CORRECTA (0, 4)
+            # Case zero boxes
+            # We must create an empty tensor with the correct shape (0, 4)
             boxes = torch.zeros((0, 4), dtype=torch.float32)
             labels = torch.zeros((0,), dtype=torch.int64)
             area = torch.zeros((0,), dtype=torch.float32)
             iscrowd = torch.zeros((0,), dtype=torch.int64)
 
-        """
-        # Converting the lists to tensors
-        boxes = torch.as_tensor(boxes, dtype = torch.float32)
-        labels = torch.as_tensor(labels, dtype=torch.int64) + 1
-
-        area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1]) # (x_max - x_min) * (y_max - y_min)
-
-        iscrowd = torch.zeros((len(boxes),), dtype=torch.int64)
-        """
         tensor_image_id = torch.as_tensor([idx])
 
         target = {}
