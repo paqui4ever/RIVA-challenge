@@ -6,13 +6,12 @@ import math
 class LearnableAnchorGenerator(nn.Module):
     def __init__(self, init_size=98.0):
         super().__init__()
-        # 1. Define anchor dimensions as learnable parameters.
-        # They are initialized to your dataset's fixed 98x98 size.
+        # Define anchor dimensions as learnable parameters.
         self.anchor_w = nn.Parameter(torch.tensor(init_size, dtype=torch.float32))
         self.anchor_h = nn.Parameter(torch.tensor(init_size, dtype=torch.float32))
         
     def generate_base_anchors(self):
-        # 2. Construct the base bounding box [x_min, y_min, x_max, y_max] centered at (0,0)
+        # Construct the base bounding box [x_min, y_min, x_max, y_max] centered at (0,0)
         # Because we use self.anchor_w and self.anchor_h, this tensor requires grad.
         half_w = self.anchor_w / 2.0
         half_h = self.anchor_h / 2.0
@@ -56,11 +55,11 @@ class FPNLearnableAnchorGenerator(nn.Module):
         super().__init__()
         self.num_levels = len(sizes)
         
-        # 1. Use ParameterList to hold separate parameters for each FPN level
+        # Use ParameterList to hold separate parameters for each FPN level
         self.anchor_w = nn.ParameterList()
         self.anchor_h = nn.ParameterList()
         
-        # 2. Translate sizes and aspect ratios into learnable widths and heights
+        # Translate sizes and aspect ratios into learnable widths and heights
         for level_sizes, level_ars in zip(sizes, aspect_ratios):
             level_w = []
             level_h = []
