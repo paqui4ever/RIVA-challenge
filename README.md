@@ -84,7 +84,9 @@ Supported models are: 'cell_dino', 'cell_dino_lora', 'sam3', 'sam3_detr_v2' ('sa
 
 Images like the following will be saved (every 10 epochs by default) to overfit_visualizations_<MODEL_NAME>. In red the predicted bounding box and in green, the ground truth.
 
-![alt text](./assets/overfit_example_image.png)
+<p align="center">
+<img src="./assets/overfit_example_image.png" width="400" alt="alt text" />
+</p>
 
 ## 📁 Generating predictions
 
