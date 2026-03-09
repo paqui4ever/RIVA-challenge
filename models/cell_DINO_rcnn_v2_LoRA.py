@@ -25,7 +25,7 @@ def build_cell_dino_fasterrcnn_lora(
     if LoraConfig is None:
         raise ImportError("Please install 'peft' to use LoRA: pip install peft")
 
-    # 1. Build standard model (base backbone frozen by default if trainable_backbone=False)
+    # Build standard model (base backbone frozen by default if trainable_backbone=False)
     # We rely on PEFT to handle freezing/unfreezing logic for the backbone.
     model = build_cell_dino_fasterrcnn(
         model_name=model_name,
@@ -33,10 +33,10 @@ def build_cell_dino_fasterrcnn_lora(
         trainable_backbone=False # We start with frozen base, then inject LoRA
     )
     
-    # 2. Identify the part to apply LoRA: The DINOv2 Vision Transformer
+    # Identify the part to apply LoRA: The DINOv2 Vision Transformer
     target_object = model.backbone.vision
     
-    # 3. Configure LoRA
+    # Configure LoRA
     # DINOv2 uses 'qkv' linear layers in its attention blocks.
     peft_config = LoraConfig(
         r=lora_rank,
@@ -46,13 +46,13 @@ def build_cell_dino_fasterrcnn_lora(
         bias="none",
     )
     
-    # 4. Apply LoRA
+    # Apply LoRA
     model.backbone.vision = get_peft_model(target_object, peft_config)
     
-    # 5. Ensure FPN layers and Heads are ID-wise trainable
+    # Ensure FPN layers and Heads are ID-wise trainable
     # The 'build_cell_dino_fasterrcnn' sets model.backbone parameters to not require grad if trainable=False
     # But FPN layers (fpn_conv, smooth_*) are initialized in the wrapper, so they are trainable by default
-    # unless explicitly frozen. Let's verify and ensure they are trainable.
+    # unless explicitly frozen. We need to verify and ensure they are trainable.
     
     model.backbone.train() # Set to train mode
     
