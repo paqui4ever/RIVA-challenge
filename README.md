@@ -1,4 +1,4 @@
-# RIVA-challenge
+# RIVA Challenge 2026 Track A
 
 <p align="center">
     <a href="https://www.kaggle.com/competitions/riva-cervical-cytology-challenge-isbi-2026/overview">
@@ -99,6 +99,12 @@ Supported models are: 'sam3_rcnn', 'sam3_rcnn_v2', 'sam3_detr', 'cell_dino_rcnn_
 This will generate a submission.csv file in the "results/" directory.
 
 > Predictions for the LoRA models are currently not fully supported. The script must be revisited before they can be used.
+
+## 💥 Upcoming features
+
+- Support for LoRA models
+- Explainability analysis using overcomplete library SAE's on revisited SAM3 + Faster-RCNN 
+- Revision of Cell-DINO and DETR models performance
 
 ##  📜 References
 
