@@ -9,12 +9,14 @@ from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.amp import GradScaler, autocast
+from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
+from torchvision.models.detection.rpn import RPNHead
 from tqdm import tqdm
 from torchmetrics.detection.mean_ap import MeanAveragePrecision
 from torch.utils.tensorboard import SummaryWriter
 import argparse
 
-# Parser for choosing the model
+# Parser for choosing the model and ablations
 parser = argparse.ArgumentParser(description="Train SAM3 Faster R-CNN")
 parser.add_argument(
     "--model", 
@@ -57,6 +59,9 @@ parser.add_argument(
 )
 parser.add_argument("--learn-anchors-single", action="store_true", help="Learn anchor sizes with single scale")
 parser.add_argument("--learn-anchors-multiple", action="store_true", help="Learn anchor sizes with multiple scale")
+parser.add_argument("--dataset-path", type=str, default="/local_data/RIVA", help="Path to the dataset")
+parser.add_argument("--batch-size", type=int, default=4, help="Batch size")
+parser.add_argument("--num-epochs", type=int, default=200, help="Number of epochs")
 args = parser.parse_args()
 
 # Checkpointing settings
@@ -71,17 +76,12 @@ RESUME_CHECKPOINT = None  # Set to checkpoint path to resume training, e.g., './
 USE_AMP = True  # Set to False to disable mixed precision
 
 # Paths
-# CSV_PATH_TRAIN = 'RIVA/annotations/annotations/train.csv'
-# CSV_PATH_VAL = 'RIVA/annotations/annotations/val.csv'
-# TRAIN_PATH = 'RIVA/images/images/train'
-# VAL_PATH = 'RIVA/images/images/val'
-# TEST_PATH = 'RIVA/images/images/test'
 
-CSV_PATH_TRAIN = '/local_data/RIVA/annotations/annotations/train.csv'
-CSV_PATH_VAL = '/local_data/RIVA/annotations/annotations/val.csv'
-TRAIN_PATH = '/local_data/RIVA/images/images/train'
-VAL_PATH = '/local_data/RIVA/images/images/val'
-TEST_PATH = '/local_data/RIVA/images/images/test'
+CSV_PATH_TRAIN = os.path.join(args.dataset_path, 'annotations/annotations/train.csv')
+CSV_PATH_VAL = os.path.join(args.dataset_path, 'annotations/annotations/val.csv')
+TRAIN_PATH = os.path.join(args.dataset_path, 'images/images/train')
+VAL_PATH = os.path.join(args.dataset_path, 'images/images/val')
+TEST_PATH = os.path.join(args.dataset_path, 'images/images/test')
 
 # Ensure repository root is importable when running train.py directly
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -96,20 +96,17 @@ try:
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
     from data.transforms import get_train_transforms_RCNN, get_valid_transforms, get_train_transforms_v2
-    from utils.anchors import LearnableAnchorGenerator, FPNLearnableAnchorGenerator
-    from torchvision.models.detection.rpn import RPNHead
 except ImportError as e:
     raise ImportError(f"Import Error: {e}. Make sure 'models' and 'data' folders are in the path.")
-
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 print(f"Using device: {device}")
 
-# ADDRESSING CLASS IMBALANCE
+# Ablation: addressing class imbalance via weighted random sampling
 sampler = None
 train_shuffle = True
 
-# Define class weights outside the block so they can be reused if needed
+# Class weights based on class distribution
 class_weights = {
     'INFL': 1.00,
     'NILM': 1.14,
@@ -130,7 +127,7 @@ def get_sample_weights_from_csv(csv_path):
 
     for img_name in unique_images:
         classes_in_img = image_groups.get_group(img_name)['class_name'].values
-        # The image weight is the MAXIMUM weight of any object inside it.
+        # The image weight is the MAXIMUM weight of any object inside it
         max_weight = max([class_weights[c] for c in classes_in_img])
         weights.append(max_weight)
     
@@ -156,7 +153,7 @@ if args.use_weighted_sampler:
 else:
     print("Using default shuffled sampling (no weighted sampler).")
 
-# 3. DATASETS & DATALOADERS
+# Loading the datasets
 
 print("Initializing Datasets with SAM3 transforms (1008x1008)...")
 
@@ -167,7 +164,7 @@ if args.merge_sets:
         root_dir=TRAIN_PATH, 
         transforms=get_train_transforms_v2()
     )
-    # Note: Use train transforms for the validation portion as well since it's now training data
+    #  Using train transforms for the validation portion as well since it's now training data
     train_ds_2 = BethesdaDataset(
         csv_file=CSV_PATH_VAL, 
         root_dir=VAL_PATH, 
@@ -190,7 +187,7 @@ test_ds = BethesdaDataset(
 def collate_fn_sam(batch):
     return tuple(zip(*batch))
 
-BATCH_SIZE = 4
+BATCH_SIZE = args.batch_size
 
 train_loader = DataLoader(
     train_ds, 
@@ -206,7 +203,7 @@ test_loader = DataLoader(
     collate_fn=collate_fn_sam
 )
 
-# 4. MODEL INITIALIZATION
+# Initializing the model
 
 num_classes = 9 # 8 classes + background
 if args.model == 'sam3_rcnn':
@@ -224,31 +221,32 @@ elif args.model == 'sam3_rcnn_v2':
     print(f"  sam3_rcnn_v2 loss: {args.sam3_rcnn_v2_loss}")
 
     if args.learn_anchors_single:
-        print("Replacing RPN anchor generator with learnable version...")
-        # Replace the default anchor generator with our learnable one
-        model.rpn.anchor_generator = LearnableAnchorGenerator(init_size=98.0) #.to(device) will happen later
+        print("Replacing RPN anchor generator with single scale learnable version...")
+        # Replace the default anchor generator with our single scale learnable one
+        model.rpn.anchor_generator = LearnableAnchorGenerator(init_size=98.0) 
 
     if args.learn_anchors_multiple:
-        print("Replacing RPN anchor generator with learnable version...")
-        # Replace the default anchor generator with our learnable one
+        print("Replacing RPN anchor generator with multi scale learnable version...")
+        # Replace the default anchor generator with our multi scale learnable one
         SIZES = ((71, 78), (92, 104), (123, 135), (158, 168))
         ASPECT_RATIOS = ((0.82, 1.0, 1.12),) * 4
-        model.rpn.anchor_generator = FPNLearnableAnchorGenerator(SIZES, ASPECT_RATIOS) #.to(device) will happen later
+        model.rpn.anchor_generator = FPNLearnableAnchorGenerator(SIZES, ASPECT_RATIOS) 
 
         num_anchors_per_location = len(SIZES[0]) * len(ASPECT_RATIOS[0]) # 2 * 3 = 6
-        in_channels = model.backbone.out_channels # Usually 256 for standard FPN
+        in_channels = model.backbone.out_channels # 256 for standard FPN
 
-        model.rpn.head = RPNHead(in_channels, num_anchors_per_location) #.to(device) will happen later
+        model.rpn.head = RPNHead(in_channels, num_anchors_per_location) 
 elif args.model == 'sam3_detr':
     print("Loading DETR with SAM3 backbone...")
     model = get_sam3_detr(num_classes=num_classes)
 
 model.to(device)
 
-# 5. OPTIMIZER
+# Defining the optimizer
 # Filter parameters requiring gradients (SAM3 backbone is frozen by default)
 params = [p for p in model.parameters() if p.requires_grad]
 
+# If we are learning anchors, we need to separate the parameters for the anchor generator and make them have a different weight decay
 if args.learn_anchors_single or args.learn_anchors_multiple:
     anchor_params = []
     base_params = []
@@ -262,10 +260,7 @@ if args.learn_anchors_single or args.learn_anchors_multiple:
         else:
             base_params.append(param)
 
-    # 3. Construct the optimizer with parameter groups
-    # We apply the standard learning rate to the base model, 
-    # and a significantly reduced learning rate to the anchors.
-    # Note: Using weight_decay=0.0 for anchors as per original script logic
+    # Construct the optimizer with parameter groups with the same learning rate but different weight decay
     optimizer = AdamW(
         [
             {
@@ -283,8 +278,8 @@ if args.learn_anchors_single or args.learn_anchors_multiple:
 else:
     optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 
-# 6. LEARNING RATE SCHEDULER
-num_epochs = 200
+# Setting up the learning rate scheduler
+num_epochs = args.num_epochs
 total_steps = num_epochs * len(train_loader)
 scheduler = None
 scheduler_type = None
@@ -295,10 +290,10 @@ elif args.use_reduce_on_plateau:
     scheduler = ReduceLROnPlateau(optimizer, mode='min', patience=5, factor=np.sqrt(0.1), verbose=True)
     scheduler_type = 'plateau'
 
-# 7. MIXED PRECISION SCALER
+# Setting up the mixed precision scaler
 scaler = GradScaler(enabled=USE_AMP)
 
-# 8. CHECKPOINT RESUME
+# Checkpoint resume setup 
 start_epoch = 0
 global_step = 0
 best_map = 0.0
@@ -316,14 +311,14 @@ if RESUME_CHECKPOINT and os.path.isfile(RESUME_CHECKPOINT):
     best_map = checkpoint.get('best_map', 0.0)
     print(f"Resumed from epoch {start_epoch}, global_step {global_step}, best_map {best_map:.4f}")
 
-# 9. TRAINING LOOP
+# Training loop
 
 print("Starting Training...")
 
 for epoch in range(start_epoch, num_epochs):
     print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
     
-    # --- TRAINING ---
+    # TRAINING 
     model.train()
     total_loss = 0
     
@@ -352,10 +347,10 @@ for epoch in range(start_epoch, num_epochs):
         # Mixed precision forward pass
         with autocast(device_type='cuda', dtype=torch.bfloat16, enabled=USE_AMP):
             if args.model == 'sam3_detr':
-                # 1. Stack List[Tensor] -> Tensor (B, C, H, W)
+                # Stack List[Tensor] -> Tensor (B, C, H, W)
                 pixel_values = torch.stack(images) 
                 
-                # 2. Rename 'labels' to 'class_labels' for HF DETR
+                # Rename 'labels' to 'class_labels' for HF DETR
                 formatted_targets = []
                 for t in targets:
                     formatted_targets.append({
@@ -363,10 +358,10 @@ for epoch in range(start_epoch, num_epochs):
                         "boxes": t["boxes"]
                     })
                 
-                # 3. Forward pass with keyword args
+                # Forward pass with keyword args
                 outputs = model(pixel_values=pixel_values, labels=formatted_targets)
                 
-                # 4. Extract losses (HF returns an output object, not a plain dict)
+                # Extract losses (HF returns an output object, not a plain dict)
                 losses = outputs.loss
                 loss_dict = outputs.loss_dict
                 
@@ -390,7 +385,7 @@ for epoch in range(start_epoch, num_epochs):
         
         writer.add_scalar("Losses/total_train", losses, global_step)
         
-        # Safe logging for keys that might not exist in both models
+        # Safe logging for keys that might not exist in different models
         for k, v in loss_dict.items():
             writer.add_scalar(f"Losses/train_{k}", v, global_step)
 
@@ -417,7 +412,7 @@ for epoch in range(start_epoch, num_epochs):
     avg_loss = total_loss / len(train_loader)
     print(f"Average Training Loss: {avg_loss:.4f}")
     
-    # --- VALIDATION (mAP) ---
+    # VALIDATION (mAP) 
     print("Validating...")
     model.eval()
     metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True)
@@ -487,7 +482,6 @@ for epoch in range(start_epoch, num_epochs):
 
             # Send to metric. Both outputs and targets are lists of dicts.
             # Outputs on device, targets on device - metric handles it.
-            # Some metrics need CPU conversion, but torchmetrics handles recent versions.
             # Ensuring CPU just in case for complex metrics if it fails.
             outputs_cpu = [{k: v.cpu() for k, v in t.items()} for t in outputs]
             targets_cpu = [{k: v.cpu() for k, v in t.items()} for t in targets]
@@ -509,6 +503,7 @@ for epoch in range(start_epoch, num_epochs):
         "ASCUS", "LSIL", "HSIL", "ASCH", "SCC"
     ]
 
+    # Log per-class AP
     map_per_class = results.get("map_per_class", None)
     classes = results.get("classes", None)
 
@@ -516,23 +511,15 @@ for epoch in range(start_epoch, num_epochs):
         map_values = None
         class_ids = None
 
-        if isinstance(map_per_class, torch.Tensor):
-            if map_per_class.ndim == 1:
-                map_values = map_per_class.detach().cpu().tolist()
-            elif map_per_class.ndim == 0:
-                map_values = None
-        elif isinstance(map_per_class, np.ndarray):
-            if map_per_class.ndim == 1:
-                map_values = map_per_class.tolist()
-        elif isinstance(map_per_class, (list, tuple)):
-            map_values = list(map_per_class)
+        def to_list(obj, enforce_1d=False):
+            if isinstance(obj, torch.Tensor):
+                obj = obj.detach().cpu()
+            if enforce_1d and getattr(obj, "ndim", 1) != 1:
+                return None
+            return obj.tolist() if hasattr(obj, "tolist") else list(obj)
 
-        if isinstance(classes, torch.Tensor):
-            class_ids = classes.detach().cpu().tolist()
-        elif isinstance(classes, np.ndarray):
-            class_ids = classes.tolist()
-        elif isinstance(classes, (list, tuple)):
-            class_ids = list(classes)
+        map_values = to_list(map_per_class, enforce_1d=True)
+        class_ids = to_list(classes) if classes is not None else None
 
         if map_values is None:
             print("  Per-class AP unavailable (metric returned scalar map_per_class).")
@@ -559,7 +546,7 @@ for epoch in range(start_epoch, num_epochs):
             if ap_dict:
                 writer.add_scalars("Validation/AP_per_class", ap_dict, epoch)
 
-    # --- CHECKPOINTING ---
+    # CHECKPOINTING 
     checkpoint_dict = {
         'epoch': epoch,
         'global_step': global_step,
