@@ -37,6 +37,19 @@ parser.add_argument(
     help="Number of steps to accumulate gradients before updating optimizer. Default 32 (effective batch 128 with batch size 4)."
 )
 
+parser.add_argument(
+    "--batch_size",
+    type=int,
+    default=4,
+    help="Batch size. Default 4."
+)
+parser.add_argument(
+    "--num_epochs",
+    type=int,
+    default=1000,
+    help="Number of epochs. Default 1000."
+)
+
 if len(sys.argv) == 2 and sys.argv[1] == "help":
     parser.print_help()
     sys.exit(0)
@@ -129,7 +142,7 @@ if args.use_weighted_sampler:
 else:
     print("Using default shuffled sampling (no weighted sampler).")
 
-# 3. DATASETS & DATALOADERS
+# DATASETS & DATALOADERS
 print("Initializing Datasets with transforms...")
 train_ds = BethesdaDataset(
     csv_file=CSV_PATH_TRAIN, 
@@ -145,7 +158,7 @@ test_ds = BethesdaDataset(
 def collate_fn_basic(batch):
     return tuple(zip(*batch))
 
-BATCH_SIZE = 4 # Cell-DINO ViT-L might take memory
+BATCH_SIZE = args.batch_size
 train_loader = DataLoader(
     train_ds, 
     batch_size=BATCH_SIZE, 
@@ -165,7 +178,7 @@ test_loader = DataLoader(
     collate_fn=collate_fn_basic
 )
 
-# 4. MODEL INITIALIZATION
+# MODEL INITIALIZATION
 num_classes = 9 # 8 classes + background
 print("Loading FasterRCNN with Cell-DINO backbone...")
 model = build_cell_dino_fasterrcnn(
@@ -178,13 +191,12 @@ model.to(device)
 
 print(f"Backbone Trainable: {args.trainable_backbone}")
 
-# 5. OPTIMIZER
+# OPTIMIZER
 params = [p for p in model.parameters() if p.requires_grad]
 optimizer = AdamW(params, lr=1e-4, weight_decay=1e-5)
 
-# 6. SCHEDULER
-num_epochs = 1000
-num_epochs = 1000
+# SCHEDULER
+num_epochs = args.num_epochs
 steps_per_epoch = math.ceil(len(train_loader) / args.gradient_accumulation_steps)
 total_steps = num_epochs * steps_per_epoch
 scheduler = None
@@ -204,10 +216,10 @@ else:
     scheduler = CosineAnnealingLR(optimizer, T_max=total_steps, eta_min=1e-6)
     scheduler_type = 'cosine'
 
-# 7. SCALER
+# SCALER
 scaler = GradScaler(enabled=USE_AMP)
 
-# 8. CHECKPOINT RESUME
+# CHECKPOINT RESUME
 start_epoch = 0
 global_step = 0
 best_map = 0.0
@@ -225,13 +237,13 @@ if RESUME_CHECKPOINT and os.path.isfile(RESUME_CHECKPOINT):
     best_map = checkpoint.get('best_map', 0.0)
     print(f"Resumed from epoch {start_epoch}, best_map {best_map:.4f}")
 
-# 9. TRAINING LOOP
+# TRAINING LOOP
 print("Starting Training...")
 
 for epoch in range(start_epoch, num_epochs):
     print(f"\n--- Epoch {epoch+1}/{num_epochs} ---")
     
-    # --- TRAINING ---
+    # TRAINING 
     model.train()
     total_loss = 0
     pbar = tqdm(train_loader, desc=f"Training Epoch {epoch+1}")
@@ -286,7 +298,7 @@ for epoch in range(start_epoch, num_epochs):
     print(f"Average Training Loss: {avg_loss:.4f}")
     writer.add_scalar("Losses/avg_epoch_loss", avg_loss, epoch)
     
-    # --- VALIDATION ---
+    # VALIDATION 
     print("Validating...")
     model.eval()
     metric = MeanAveragePrecision(iou_type="bbox", class_metrics=True)
@@ -342,21 +354,15 @@ for epoch in range(start_epoch, num_epochs):
         map_values = None
         class_ids = None
 
-        if isinstance(map_per_class, torch.Tensor):
-            if map_per_class.ndim == 1:
-                map_values = map_per_class.detach().cpu().tolist()
-        elif isinstance(map_per_class, np.ndarray):
-            if map_per_class.ndim == 1:
-                map_values = map_per_class.tolist()
-        elif isinstance(map_per_class, (list, tuple)):
-            map_values = list(map_per_class)
+        def to_list(obj, enforce_1d=False):
+            if isinstance(obj, torch.Tensor):
+                obj = obj.detach().cpu()
+            if enforce_1d and getattr(obj, "ndim", 1) != 1:
+                return None
+            return obj.tolist() if hasattr(obj, "tolist") else list(obj)
 
-        if isinstance(classes, torch.Tensor):
-            class_ids = classes.detach().cpu().tolist()
-        elif isinstance(classes, np.ndarray):
-            class_ids = classes.tolist()
-        elif isinstance(classes, (list, tuple)):
-            class_ids = list(classes)
+        map_values = to_list(map_per_class, enforce_1d=True)
+        class_ids = to_list(classes) if classes is not None else None
 
         if map_values is None:
             print("  Per-class AP unavailable (metric returned scalar map_per_class).")
