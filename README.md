@@ -123,7 +123,7 @@ If you use this code in your research, please cite:
 @article{ren2015fasterrcnn,
       author="Shaoqing Ren and Kaiming He and Ross Girshick and Jian Sun",
       title="Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks",
-      journal="Advances in Neural Information Processing Systems (NIPS)",
+      journal="Advances in Neural Information Processing Systems (NeurIPS)",
       year=2015
 }
 ```
