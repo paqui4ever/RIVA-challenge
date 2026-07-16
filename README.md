@@ -100,6 +100,36 @@ This will generate a submission.csv file in the "results/" directory.
 
 > Predictions for the LoRA models are currently not fully supported. The script must be revisited before they can be used.
 
+## 🧠 Interpretability Analysis
+
+### Training
+To train the Sparse Autoencoders (SAEs) on the activations of the SAM3 backbone, run the `train_saes.py` script. The script automatically splits the dataset, extracts and caches the model activations, and trains four SAE architectures (`TopKSAE`, `RATopKSAE`, `MPSAE`, `OMPSAE`), logging the results to your preferred logger:
+
+```cli
+python interpretability_analysis/train_saes.py --logger wandb
+```
+
+You can customize the training hyperparameters, for example:
+```cli
+python interpretability_analysis/train_saes.py --lr 1e-4 --batch_size 64 --epochs 300 --k 32 --expansion_factor 8.0 --logger tensorboard
+```
+
+By default, the script trains for 500 epochs with a learning rate of `3e-4`, a sparsity constraint (`k`) of `16`, and an expansion factor of `4.0`. Once training completes, the resulting checkpoints are saved directly into the `interpretability_analysis/checkpoints/` directory.
+
+### Visualization
+To visualize the learned concepts of our trained Sparse Autoencoders (SAEs) using the `overcomplete` library, run the following script:
+```cli
+python interpretability_analysis/visualize_saes.py --sae_type <SAE_TYPE> --concept_id <CONCEPT_ID>
+```
+Supported SAE types are: 'TopKSAE', 'RATopKSAE', 'MPSAE', 'OMPSAE'.
+
+You can also specify which visualizations to generate (`overlay`, `evidence`, `zoom`, `contour`) and where to save them:
+```cli
+python interpretability_analysis/visualize_saes.py --sae_type OMPSAE --concept_id 5 --visualizations overlay zoom --save_dir ./custom_dir/
+```
+
+> In case of not knowing how to use the visualization script, you can always run `python interpretability_analysis/visualize_saes.py --help` to see all available arguments.
+
 ## 💥 Upcoming features
 
 - Support for LoRA models
@@ -207,5 +237,33 @@ abstract = {In this work, a new algorithm for drawing a weighted random sample o
     year = {2026},
     howpublished = {\url{https://kaggle.com/competitions/riva-cervical-cytology-challenge-track-a-isbi-final-evaluation}},
     note = {Kaggle}
+}
+
+@article{fel2025archetypal,
+  title     = {Archetypal SAE: Adaptive and Stable Dictionary Learning for Concept Extraction in Large Vision Models},
+  author    = {Fel, Thomas and Lubana, Ekdeep Singh and Prince, Jacob S. and Kowal, Matthew and Boutin, Victor and Papadimitriou, Isabel and Wang, Binxu and Wattenberg, Martin and Ba, Demba and Konkle, Talia},
+  journal   = {arXiv preprint arXiv:2502.12892},
+  year      = {2025},
+  url       = {https://arxiv.org/abs/2502.12892}
+}
+
+@misc{gao2024scalingevaluatingsparseautoencoders,
+      title={Scaling and evaluating sparse autoencoders}, 
+      author={Leo Gao and Tom Dupré la Tour and Henk Tillman and Gabriel Goh and Rajan Troll and Alec Radford and Ilya Sutskever and Jan Leike and Jeffrey Wu},
+      year={2024},
+      eprint={2406.04093},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2406.04093}, 
+}
+
+@misc{costa2025flathierarchicalextractingsparse,
+      title={From Flat to Hierarchical: Extracting Sparse Representations with Matching Pursuit}, 
+      author={Valérie Costa and Thomas Fel and Ekdeep Singh Lubana and Bahareh Tolooshams and Demba Ba},
+      year={2025},
+      eprint={2506.03093},
+      archivePrefix={arXiv},
+      primaryClass={cs.LG},
+      url={https://arxiv.org/abs/2506.03093}, 
 }
 ```
