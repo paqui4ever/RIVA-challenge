@@ -16,8 +16,8 @@ from models.sam3_rcnn_v2 import build_sam3_fasterrcnn
 from interpretability_analysis.train_saes import get_data_splits, ImagePathDataset
 
 # Import SAE models
-from overcomplete import TopKSAE, MPSAE
-from overcomplete.sae import RATopKSAE, OMPSAE
+from overcomplete import TopKSAE
+from custom_saes import RATopKSAE, OMPSAE, MpSAE as MPSAE
 
 # Import overcomplete visualization functions
 from overcomplete.visualization import (
@@ -88,7 +88,7 @@ def main(args):
         sam3_weights = [w for w in weight_files if "sam3" in w.name.lower()]
         best_weight = sam3_weights[0] if sam3_weights else weight_files[0]
         print(f"Found SAM3 weights: {best_weight}. Loading...")
-        state_dict = torch.load(best_weight, map_location="cpu")
+        state_dict = torch.load(best_weight, map_location="cpu", weights_only=False)
         if "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
         sam3_model.load_state_dict(state_dict, strict=False)
@@ -115,10 +115,10 @@ def main(args):
 
     # 3. Initialize and Load SAE
     sae_classes = {
-        "TopKSAE": TopKSAE,
-        "RATopKSAE": RATopKSAE,
-        "MPSAE": MPSAE,
-        "OMPSAE": OMPSAE,
+        "TopKSAE": lambda d, h, k: TopKSAE(d, h, k=k),
+        "RATopKSAE": lambda d, h, k: RATopKSAE(d, h, points=torch.randn(1024, d), top_k=k),
+        "MPSAE": lambda d, h, k: MPSAE(d, h, k=k),
+        "OMPSAE": lambda d, h, k: OMPSAE(d, h, k=k),
     }
 
     if args.sae_type not in sae_classes:
@@ -132,7 +132,7 @@ def main(args):
     
     if os.path.exists(checkpoint_path):
         print(f"Loading SAE checkpoint from {checkpoint_path}")
-        sae_model.load_state_dict(torch.load(checkpoint_path, map_location="cpu"))
+        sae_model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=False))
     else:
         print(f"Warning: SAE checkpoint {checkpoint_path} not found. Using untrained SAE.")
     
