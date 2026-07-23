@@ -13,11 +13,14 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from tqdm import tqdm
 import torchvision.transforms.functional as TVF
 
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
 # Import custom SAM3 Faster RCNN components
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
 
-from overcomplete import TopKSAE, MPSAE
-from overcomplete.sae import RATopKSAE, OMPSAE
+from overcomplete import TopKSAE
+from custom_saes import RATopKSAE, OMPSAE, MpSAE as MPSAE
 # Rename it so it doesn't clash with the function name on this script
 from overcomplete.sae.train import train_sae as lib_train_sae
 
@@ -73,14 +76,14 @@ def get_data_splits(base_dir, seed=42):
         val_files_all[mid_point:]
     )
 
-def extract_and_cache_features(model, image_paths, cache_path, device, batch_size=8):
+def extract_and_cache_features(model, image_paths, cache_path, device, batch_size=1):
     if os.path.exists(cache_path):
         print(f"Loading cached features from {cache_path}")
-        return torch.load(cache_path)
+        return torch.load(cache_path, weights_only=False)
 
     print(f"Extracting features to {cache_path}...")
     dataset = ImagePathDataset(image_paths)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     activations = []
     
@@ -93,7 +96,7 @@ def extract_and_cache_features(model, image_paths, cache_path, device, batch_siz
 
     # Register hook on the FPN backbone
     handle = model.backbone.register_forward_hook(hook_fn)
-
+    
     model.eval()
     with torch.no_grad():
         for batch in tqdm(dataloader, desc="Extracting"):
@@ -176,18 +179,23 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
             _, val_z, val_recon = model(val_batch)
             _, train_z, train_recon = model(train_batch_subset)
 
+            def _get_val(m):
+                if hasattr(m, 'numel') and m.numel() > 1:
+                    return float(m.sum().item())
+                return m.item() if hasattr(m, 'item') else float(m)
+
             # Compute metrics
             metrics = {
                 f"{name}/train_loss": train_loss,
                 f"{name}/lr": scheduler.get_last_lr()[0],
-                f"{name}/r2_score_val": r2_score(val_batch, val_recon).item(),
-                f"{name}/avg_l2_loss_train": avg_l2_loss(train_batch_subset, train_recon).item(),
-                f"{name}/avg_l2_loss_val": avg_l2_loss(val_batch, val_recon).item(),
-                f"{name}/l1_train": l1(train_z).item(),
-                f"{name}/sparsity_eps_val": sparsity_eps(val_z, eps=1e-5).item(),
-                f"{name}/dead_codes_val": dead_codes(val_z).item(),
-                f"{name}/relative_avg_l2_loss_val": relative_avg_l2_loss(val_batch, val_recon).item(),
-                f"{name}/hoyer_val": hoyer(val_z).item(),
+                f"{name}/r2_score_val": _get_val(r2_score(val_batch, val_recon)),
+                f"{name}/avg_l2_loss_train": _get_val(avg_l2_loss(train_batch_subset, train_recon)),
+                f"{name}/avg_l2_loss_val": _get_val(avg_l2_loss(val_batch, val_recon)),
+                f"{name}/l1_train": _get_val(l1(train_z)),
+                f"{name}/sparsity_eps_val": _get_val(sparsity_eps(val_z)),
+                f"{name}/dead_codes_val": _get_val(dead_codes(val_z)),
+                f"{name}/relative_avg_l2_loss_val": _get_val(relative_avg_l2_loss(val_batch, val_recon)),
+                f"{name}/hoyer_val": _get_val(hoyer(val_z)),
             }
             
             if hasattr(model, 'get_dictionary') and callable(model.get_dictionary):
@@ -225,19 +233,15 @@ def main(args):
     model = build_sam3_fasterrcnn(trainable_backbone=False)
     
     # Load weights
-    weight_dir = Path("./weights")
-    weight_files = list(weight_dir.glob("*.pt")) + list(weight_dir.glob("*.pth"))
-    if weight_files:
-        sam3_weights = [w for w in weight_files if "sam3" in w.name.lower()]
-        best_weight = sam3_weights[0] if sam3_weights else weight_files[0]
-        print(f"Found weights: {best_weight}. Loading...")
-        state_dict = torch.load(best_weight, map_location="cpu")
+    if args.weight_checkpoint and os.path.exists(args.weight_checkpoint):
+        print(f"Found weights: {args.weight_checkpoint}. Loading...")
+        state_dict = torch.load(args.weight_checkpoint, map_location="cpu", weights_only=False)
         if "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
         # Allow missing keys in case it's a partial weight
         model.load_state_dict(state_dict, strict=False)
     else:
-        print("Warning: No weights found in ./weights/. Using initialized weights.")
+        print(f"Warning: No weights found at {args.weight_checkpoint}. Using initialized weights.")
 
     model.to(device)
     model.eval()
@@ -260,7 +264,7 @@ def main(args):
     # Initialize SAEs
     sae_models = {
         "TopKSAE": TopKSAE(input_dim, hidden_dim, k=args.k),
-        "RATopKSAE": RATopKSAE(input_dim, hidden_dim, k=args.k),
+        "RATopKSAE": RATopKSAE(input_dim, hidden_dim, points=train_features[:1024], top_k=args.k),
         "MPSAE": MPSAE(input_dim, hidden_dim, k=args.k),
         "OMPSAE": OMPSAE(input_dim, hidden_dim, k=args.k),
     }
@@ -328,6 +332,7 @@ if __name__ == "__main__":
     parser.add_argument("--k", type=int, default=16, help="Target sparsity (L0 / k)")
     parser.add_argument("--expansion_factor", type=float, default=4.0, help="Expansion factor for dictionary size")
     parser.add_argument("--logger", type=str, choices=["wandb", "tensorboard", "none"], default="wandb", help="Logger to use")
+    parser.add_argument("--weight_checkpoint", type=str, default="./weights/rcnn_best_anchors/best_checkpoint.pth", help="Path to weights checkpoint")
     
     args = parser.parse_args()
     main(args)
