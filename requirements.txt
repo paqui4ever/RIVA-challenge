@@ -13,3 +13,4 @@ python-dotenv==1.2.1
 peft==0.18.1
 overcomplete>= 0.2.2
 wandb>=0.24.1
+kaggle>=2.2.3
