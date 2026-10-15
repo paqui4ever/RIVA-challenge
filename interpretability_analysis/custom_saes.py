@@ -373,3 +373,18 @@ class OMPSAE(SAE):
         return super().train(mode)
 
 
+# ==============================================================================
+# Block-Sparse Featurizers (BSF)
+# Copied and adapted from Goodfire AI (https://github.com/goodfire-ai/block-sparse-featurizer)
+# ==============================================================================
+from block_sparse import (
+    BSF,
+    VanillaBSF,
+    GrassmannianBSF,
+    group_topk,
+    unit_blocks,
+    plot_block_concepts_manifold
+)
+
+
+

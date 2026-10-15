@@ -20,9 +20,17 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
 
 from overcomplete import TopKSAE
-from custom_saes import RATopKSAE, OMPSAE, MpSAE as MPSAE
+from custom_saes import (
+    RATopKSAE, 
+    OMPSAE, 
+    MpSAE as MPSAE,
+    # Block-Sparse Featurizers (Goodfire AI: https://github.com/goodfire-ai/block-sparse-featurizer)
+    VanillaBSF,
+    GrassmannianBSF
+)
 # Rename it so it doesn't clash with the function name on this script
 from overcomplete.sae.train import train_sae as lib_train_sae
+
 
 from overcomplete.metrics import (
     r2_score,
@@ -167,6 +175,10 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
         
         train_loss = logs['avg_loss'][0] if 'avg_loss' in logs and len(logs['avg_loss']) > 0 else 0.0
         
+        # Normalize decoder atoms if model supports it (e.g. VanillaBSF)
+        if hasattr(model, 'normalize_decoder') and callable(model.normalize_decoder):
+            model.normalize_decoder()
+        
         # Evaluation every epoch
         model.eval()
         with torch.no_grad():
@@ -259,78 +271,158 @@ def main(args):
 
     input_dim = train_features.shape[1]
     hidden_dim = int(input_dim * args.expansion_factor)
-    print(f"Input Dim: {input_dim}, Hidden Dim: {hidden_dim}")
-
-    # Initialize SAEs
-    sae_models = {
-        "TopKSAE": TopKSAE(input_dim, hidden_dim, k=args.k),
-        "RATopKSAE": RATopKSAE(input_dim, hidden_dim, points=train_features[:1024], top_k=args.k),
-        "MPSAE": MPSAE(input_dim, hidden_dim, k=args.k),
-        "OMPSAE": OMPSAE(input_dim, hidden_dim, k=args.k),
-    }
+    n_groups = max(1, hidden_dim // args.block_size)
+    print(f"Input Dim: {input_dim}, Hidden Dim: {hidden_dim}, BSF Groups: {n_groups} (Group Size: {args.block_size})")
 
     checkpoint_dir = "./interpretability_analysis/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    trained_models = {}
-    for name, sae in sae_models.items():
-        trained = train_sae(sae, name, train_features, val_features, args, device, logger)
-        trained_models[name] = trained
-        
-        checkpoint_path = os.path.join(checkpoint_dir, f"{name}_sae.pt")
-        torch.save(trained.state_dict(), checkpoint_path)
-        print(f"Saved {name} to {checkpoint_path}")
-        
-        if args.logger == "wandb":
-            artifact = wandb.Artifact(name=f"{name}_sae", type="model")
-            artifact.add_file(checkpoint_path)
-            wandb.log_artifact(artifact)
+    available_models = [
+        "TopKSAE",
+        "RATopKSAE",
+        "MPSAE",
+        "OMPSAE",
+        "VanillaBSF",
+        "GrassmannianBSF"
+    ]
 
-    print("\n--- Final Dictionary Comparison ---")
-    names = list(trained_models.keys())
-    
+    def build_model(model_name):
+        if model_name == "TopKSAE":
+            return TopKSAE(input_dim, hidden_dim, top_k=args.k)
+        elif model_name == "RATopKSAE":
+            return RATopKSAE(input_dim, hidden_dim, points=train_features[:1024], top_k=args.k)
+        elif model_name == "MPSAE":
+            return MPSAE(input_dim, hidden_dim, k=args.k)
+        elif model_name == "OMPSAE":
+            return OMPSAE(input_dim, hidden_dim, k=args.k)
+        elif model_name == "VanillaBSF":
+            return VanillaBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k)
+        elif model_name == "GrassmannianBSF":
+            return GrassmannianBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k)
+        else:
+            raise ValueError(f"Unknown model name: {model_name}")
+
     def _get_dict(m):
         if hasattr(m, 'get_dictionary') and callable(m.get_dictionary):
             return m.get_dictionary()
         elif hasattr(m, 'dictionary'):
             return m.dictionary
         return None
-        
-    for i in range(len(names)):
-        for j in range(i + 1, len(names)):
-            m1, m2 = trained_models[names[i]], trained_models[names[j]]
-            d1 = _get_dict(m1)
-            d2 = _get_dict(m2)
+
+    # Handle --quick_test mode
+    if args.quick_test:
+        print("\n*** [QUICK TEST MODE ENABLED] ***")
+        print("Trimming dataset to 1000 samples and epochs to 2 for rapid pipeline verification.")
+        args.epochs = 2
+        train_features = train_features[:1000]
+        val_features = val_features[:500]
+
+    # Determine which models to train
+    if "all" in args.models:
+        target_models = available_models
+    else:
+        target_models = [m for m in args.models if m in available_models]
+
+    trained_models = {}
+
+    if not args.compare_only:
+        print(f"\nTarget models to train: {target_models}")
+        for name in target_models:
+            print(f"\nInstantiating {name}...")
+            sae = build_model(name)
+            trained = train_sae(sae, name, train_features, val_features, args, device, logger)
+            trained_models[name] = trained
             
-            if d1 is not None and d2 is not None:
-                h_loss = hungarian_loss(d1, d2)
-                ch_loss = cosine_hungarian_loss(d1, d2)
-                print(f"Comparison {names[i]} vs {names[j]}:")
-                print(f"  Hungarian Loss: {h_loss:.4f}")
-                print(f"  Cosine Hungarian Loss: {ch_loss:.4f}")
+            checkpoint_path = os.path.join(checkpoint_dir, f"{name}_sae.pt")
+            torch.save(trained.state_dict(), checkpoint_path)
+            print(f"Saved {name} to {checkpoint_path}")
+            
+            if args.logger == "wandb":
+                artifact = wandb.Artifact(name=f"{name}_sae", type="model")
+                artifact.add_file(checkpoint_path)
+                wandb.log_artifact(artifact)
+    else:
+        print("\n--compare_only enabled: Skipping training, proceeding directly to dictionary comparison.")
+
+    # Dictionary comparison (gather in-memory models + existing saved checkpoints)
+    print("\n--- Final Dictionary Comparison ---")
+    all_dictionaries = {}
+
+    # 1. From models just trained in this run
+    for name, m in trained_models.items():
+        d = _get_dict(m)
+        if d is not None:
+            all_dictionaries[name] = d.detach().cpu()
+
+    # 2. From saved checkpoints on disk for models not trained in this run
+    for name in available_models:
+        if name not in all_dictionaries:
+            ckpt_path = os.path.join(checkpoint_dir, f"{name}_sae.pt")
+            if os.path.exists(ckpt_path):
+                print(f"Loading existing checkpoint for comparison: {name} ({ckpt_path})")
+                try:
+                    m = build_model(name)
+                    m.load_state_dict(torch.load(ckpt_path, map_location="cpu", weights_only=False))
+                    d = _get_dict(m)
+                    if d is not None:
+                        all_dictionaries[name] = d.detach().cpu()
+                except Exception as e:
+                    print(f"Warning: Could not load {name} for comparison: {e}")
+
+    names = list(all_dictionaries.keys())
+    print(f"Available dictionaries for comparison: {names}")
+    
+    if len(names) < 2:
+        print("Note: Less than 2 models available for pairwise comparison.")
+    else:
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                n1, n2 = names[i], names[j]
+                d1, d2 = all_dictionaries[n1], all_dictionaries[n2]
                 
-                if logger:
-                    comp_name = f"{names[i]}_vs_{names[j]}"
-                    metrics = {
-                        f"Comparison/{comp_name}_hungarian_loss": h_loss,
-                        f"Comparison/{comp_name}_cosine_hungarian_loss": ch_loss
-                    }
-                    if args.logger == "wandb":
-                        logger.log(metrics)
-                    elif args.logger == "tensorboard":
-                        logger.add_scalar(f"Comparison/{comp_name}_hungarian_loss", h_loss, 0)
-                        logger.add_scalar(f"Comparison/{comp_name}_cosine_hungarian_loss", ch_loss, 0)
+                # Check dimensions before Hungarian loss
+                if d1.shape == d2.shape:
+                    try:
+                        h_loss = hungarian_loss(d1.to(device), d2.to(device))
+                        ch_loss = cosine_hungarian_loss(d1.to(device), d2.to(device))
+                        print(f"Comparison {n1} vs {n2}:")
+                        print(f"  Hungarian Loss: {h_loss:.4f}")
+                        print(f"  Cosine Hungarian Loss: {ch_loss:.4f}")
+                        
+                        if logger:
+                            comp_name = f"{n1}_vs_{n2}"
+                            metrics = {
+                                f"Comparison/{comp_name}_hungarian_loss": h_loss,
+                                f"Comparison/{comp_name}_cosine_hungarian_loss": ch_loss
+                            }
+                            if args.logger == "wandb":
+                                logger.log(metrics)
+                            elif args.logger == "tensorboard":
+                                logger.add_scalar(f"Comparison/{comp_name}_hungarian_loss", h_loss, 0)
+                                logger.add_scalar(f"Comparison/{comp_name}_cosine_hungarian_loss", ch_loss, 0)
+                    except Exception as e:
+                        print(f"Comparison {n1} vs {n2} skipped due to error: {e}")
+                else:
+                    print(f"Comparison {n1} ({d1.shape}) vs {n2} ({d2.shape}): Shapes differ, skipping Hungarian loss.")
 
     if args.logger == "wandb":
         wandb.finish()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train SAEs on SAM3 Faster R-CNN features")
+    available_choices = ["all", "TopKSAE", "RATopKSAE", "MPSAE", "OMPSAE", "VanillaBSF", "GrassmannianBSF"]
+    parser = argparse.ArgumentParser(description="Train SAEs and BSFs on SAM3 Faster R-CNN features")
+    parser.add_argument("--models", nargs="+", default=["all"], choices=available_choices,
+                        help="List of SAE/BSF models to train. (default: all)")
+    parser.add_argument("--quick_test", action="store_true",
+                        help="Fast test mode: trains for 2 epochs on 1000 samples to verify pipeline.")
+    parser.add_argument("--compare_only", action="store_true",
+                        help="Skip training and run dictionary comparison on existing checkpoints.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--epochs", type=int, default=500, help="Number of training epochs")
     parser.add_argument("--k", type=int, default=16, help="Target sparsity (L0 / k)")
     parser.add_argument("--expansion_factor", type=float, default=4.0, help="Expansion factor for dictionary size")
+    parser.add_argument("--block_size", type=int, default=4, help="Block size for Block-Sparse Featurizers (BSF)")
     parser.add_argument("--logger", type=str, choices=["wandb", "tensorboard", "none"], default="wandb", help="Logger to use")
     parser.add_argument("--weight_checkpoint", type=str, default="./weights/rcnn_best_anchors/best_checkpoint.pth", help="Path to weights checkpoint")
     
