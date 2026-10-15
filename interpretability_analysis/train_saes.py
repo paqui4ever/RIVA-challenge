@@ -103,7 +103,13 @@ def extract_and_cache_features(model, image_paths, cache_path, device, batch_siz
         print(f"Loading cached features from {cache_path}")
         return torch.load(cache_path, weights_only=False)
 
-    print(f"Extracting features to {cache_path}...")
+    if not image_paths or len(image_paths) == 0:
+        raise ValueError(
+            f"Cannot extract features to '{cache_path}': no images found in the dataset folder. "
+            "Please specify the dataset path using --base_image_dir or --dataset_path."
+        )
+
+    print(f"Extracting features to {cache_path} from {len(image_paths)} images...")
     dataset = ImagePathDataset(image_paths)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
@@ -333,32 +339,68 @@ def main(args):
     else:
         logger = None
 
-    # Load Model
-    print("Loading SAM3 Faster R-CNN...")
-    model = build_sam3_fasterrcnn(trainable_backbone=False)
-    
-    # Load weights
-    if args.weight_checkpoint and os.path.exists(args.weight_checkpoint):
-        print(f"Found weights: {args.weight_checkpoint}. Loading...")
-        state_dict = torch.load(args.weight_checkpoint, map_location="cpu", weights_only=False)
-        if "model_state_dict" in state_dict:
-            state_dict = state_dict["model_state_dict"]
-        # Allow missing keys in case it's a partial weight
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        print(f"Warning: No weights found at {args.weight_checkpoint}. Using initialized weights.")
-
-    model.to(device)
-    model.eval()
-
-    # Data pipeline
-    base_image_dir = "./RIVA/images/images"
-    train_paths, val_paths, test_paths = get_data_splits(base_image_dir)
-    print(f"Data Splits -> Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}")
-
     cache_dir = "./interpretability_analysis/features"
-    train_features = extract_and_cache_features(model, train_paths, os.path.join(cache_dir, "train_features.pt"), device)
-    val_features = extract_and_cache_features(model, val_paths, os.path.join(cache_dir, "val_features.pt"), device)
+    train_cache = os.path.join(cache_dir, "train_features.pt")
+    val_cache = os.path.join(cache_dir, "val_features.pt")
+
+    # If features are already cached, load them directly without loading SAM3
+    if os.path.exists(train_cache) and os.path.exists(val_cache):
+        print(f"Found cached features at {cache_dir}. Loading directly...")
+        train_features = torch.load(train_cache, weights_only=False)
+        val_features = torch.load(val_cache, weights_only=False)
+    else:
+        # Load Model only if feature extraction is required
+        print("Cached features not found. Initializing SAM3 Faster R-CNN for feature extraction...")
+        model = build_sam3_fasterrcnn(trainable_backbone=False)
+        
+        # Load weights
+        if args.weight_checkpoint and os.path.exists(args.weight_checkpoint):
+            print(f"Found weights: {args.weight_checkpoint}. Loading...")
+            state_dict = torch.load(args.weight_checkpoint, map_location="cpu", weights_only=False)
+            if "model_state_dict" in state_dict:
+                state_dict = state_dict["model_state_dict"]
+            model.load_state_dict(state_dict, strict=False)
+        else:
+            print(f"Warning: No weights found at {args.weight_checkpoint}. Using initialized weights.")
+
+        model.to(device)
+        model.eval()
+
+        # Resolve dataset image path
+        candidate_dirs = [
+            args.base_image_dir,
+            os.path.join(args.dataset_path, "images/images") if args.dataset_path else None,
+            os.path.join(args.dataset_path, "images") if args.dataset_path else None,
+            "/local_data/RIVA/images/images",
+            "/local_data/RIVA/images",
+            "./RIVA/images/images",
+            "./data/RIVA/images/images",
+            "./images/images"
+        ]
+
+        resolved_base_dir = None
+        train_paths, val_paths, test_paths = [], [], []
+
+        for candidate in candidate_dirs:
+            if candidate and os.path.isdir(candidate):
+                tr, va, te = get_data_splits(candidate)
+                if len(tr) > 0 or len(va) > 0:
+                    resolved_base_dir = candidate
+                    train_paths, val_paths, test_paths = tr, va, te
+                    break
+
+        if not resolved_base_dir:
+            raise FileNotFoundError(
+                "Could not find dataset images in any of the default locations. "
+                "Please specify the directory containing 'train', 'val', 'test' folders via: "
+                "--base_image_dir <path> (e.g. --base_image_dir /local_data/RIVA/images/images)"
+            )
+
+        print(f"Using dataset from: {resolved_base_dir}")
+        print(f"Data Splits -> Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}")
+
+        train_features = extract_and_cache_features(model, train_paths, train_cache, device)
+        val_features = extract_and_cache_features(model, val_paths, val_cache, device)
     # Test set extraction can be done later if needed for final eval
     # test_features = extract_and_cache_features(model, test_paths, os.path.join(cache_dir, "test_features.pt"), device)
 
@@ -532,6 +574,10 @@ if __name__ == "__main__":
     parser.add_argument("--logger", type=str, choices=["wandb", "tensorboard", "none"], default="wandb", help="Logger to use")
     parser.add_argument("--results_dir", type=str, default="./interpretability_analysis/results",
                         help="Directory to save CSV logs and summaries")
+    parser.add_argument("--base_image_dir", type=str, default="",
+                        help="Path to folder containing 'train', 'val', 'test' image folders")
+    parser.add_argument("--dataset_path", type=str, default="",
+                        help="Root path to the RIVA dataset (e.g. /local_data/RIVA)")
     parser.add_argument("--weight_checkpoint", type=str, default="./weights/rcnn_best_anchors/best_checkpoint.pth", help="Path to weights checkpoint")
     
     args = parser.parse_args()
