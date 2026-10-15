@@ -14,3 +14,4 @@ peft==0.18.1
 overcomplete>= 0.2.2
 wandb>=0.24.1
 kaggle>=2.2.3
+einops>=0.8.0
