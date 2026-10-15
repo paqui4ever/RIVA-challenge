@@ -196,10 +196,10 @@ class MpSAE(SAE):
         if self.dropout is not None:
             # dropout directly on the weights (dictionary) atoms
             drop_w = torch.bernoulli((1.0 - self.dropout) *
-                                     torch.ones(self.nb_concepts, 1, device=self.device))
+                                     torch.ones(self.nb_concepts, 1, device=x.device))
             W = W * drop_w
 
-        codes = torch.zeros(x.shape[0], self.nb_concepts, device=self.device)
+        codes = torch.zeros(x.shape[0], self.nb_concepts, device=x.device)
         residual = x.clone()
 
         # greedy selection of dictionary atoms
@@ -322,12 +322,12 @@ class OMPSAE(SAE):
 
         if self.dropout is not None:
             drop_mask = torch.bernoulli(
-                (1.0 - self.dropout) * torch.ones(W.shape[0], device=self.device)
+                (1.0 - self.dropout) * torch.ones(W.shape[0], device=x.device)
             )
             W = W * drop_mask.unsqueeze(1)
 
         batch_size = x.shape[0]
-        codes = torch.zeros(batch_size, self.nb_concepts, device=self.device)
+        codes = torch.zeros(batch_size, self.nb_concepts, device=x.device)
         residual = x.clone()
         selected_atoms = None
 

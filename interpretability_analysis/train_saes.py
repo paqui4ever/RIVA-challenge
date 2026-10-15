@@ -430,18 +430,19 @@ def main(args):
     ]
 
     def build_model(model_name):
+        dev_str = str(device)
         if model_name == "TopKSAE":
-            return TopKSAE(input_dim, hidden_dim, top_k=args.k)
+            return TopKSAE(input_dim, hidden_dim, top_k=args.k, device=dev_str)
         elif model_name == "RATopKSAE":
-            return RATopKSAE(input_dim, hidden_dim, points=train_features[:1024], top_k=args.k)
+            return RATopKSAE(input_dim, hidden_dim, points=train_features[:1024].to(device), top_k=args.k, device=dev_str)
         elif model_name == "MPSAE":
-            return MPSAE(input_dim, hidden_dim, k=args.k)
+            return MPSAE(input_dim, hidden_dim, k=args.k, device=dev_str)
         elif model_name == "OMPSAE":
-            return OMPSAE(input_dim, hidden_dim, k=args.k)
+            return OMPSAE(input_dim, hidden_dim, k=args.k, device=dev_str)
         elif model_name == "VanillaBSF":
-            return VanillaBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k)
+            return VanillaBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k).to(device)
         elif model_name == "GrassmannianBSF":
-            return GrassmannianBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k)
+            return GrassmannianBSF(d=input_dim, n_groups=n_groups, group_size=args.block_size, l0=args.k).to(device)
         else:
             raise ValueError(f"Unknown model name: {model_name}")
 
