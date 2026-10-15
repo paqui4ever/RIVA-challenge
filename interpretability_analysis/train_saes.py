@@ -233,10 +233,18 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
                 return m.item() if hasattr(m, 'item') else float(m)
 
             collin_val = 0.0
+            dict_tensor = None
             if hasattr(model, 'get_dictionary') and callable(model.get_dictionary):
-                collin_val = float(dictionary_collinearity(model.get_dictionary())[0].item())
+                dict_tensor = model.get_dictionary()
             elif hasattr(model, 'dictionary'):
-                collin_val = float(dictionary_collinearity(model.dictionary)[0].item())
+                dict_tensor = model.dictionary
+
+            if dict_tensor is not None:
+                try:
+                    c_out = dictionary_collinearity(dict_tensor)[0]
+                    collin_val = _get_val(c_out)
+                except Exception as e:
+                    pass
 
             # Compute metrics
             r2_val = _get_val(r2_score(val_batch, val_recon))
