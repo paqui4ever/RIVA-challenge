@@ -1,4 +1,6 @@
 import argparse
+import csv
+from datetime import datetime
 import math
 import os
 import random
@@ -36,7 +38,6 @@ from overcomplete.metrics import (
     r2_score,
     avg_l2_loss,
     l1,
-    sparsity_eps,
     dead_codes,
     relative_avg_l2_loss,
     hoyer,
@@ -44,6 +45,19 @@ from overcomplete.metrics import (
     hungarian_loss,
     cosine_hungarian_loss,
 )
+
+# overcomplete 0.3.0 renamed or removed sparsity_eps in favor of l0_eps
+#try:
+#    from overcomplete.metrics import sparsity_eps
+#except ImportError:
+#    try:
+from overcomplete.metrics import l0_eps as sparsity_eps
+#    except ImportError:
+#        def sparsity_eps(x, dims=None, threshold=1e-6):
+#            if dims is None:
+#                return torch.mean((torch.abs(x) <= threshold).float())
+#            return torch.mean((torch.abs(x) <= threshold).float(), dims)
+
 
 class ImagePathDataset(Dataset):
     def __init__(self, image_paths, target_size=1008):
@@ -142,7 +156,21 @@ def get_lr_scheduler(optimizer, warmup_steps, total_steps, initial_lr, base_lr):
 def custom_criterion(x, x_hat, z_pre, z, dictionary):
     return torch.nn.functional.mse_loss(x, x_hat)
 
-def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
+def save_records_to_csv(filepath, records):
+    """Saves or appends a list of dict records to a CSV file."""
+    if not records:
+        return
+    os.makedirs(os.path.dirname(os.path.abspath(filepath)), exist_ok=True)
+    file_exists = os.path.exists(filepath) and os.path.getsize(filepath) > 0
+    keys = list(records[0].keys())
+    with open(filepath, mode="a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerows(records)
+    print(f"Logged {len(records)} record(s) to CSV: {filepath}")
+
+def train_sae(model, name, train_tensor, val_tensor, args, device, logger, results_dir="./interpretability_analysis/results"):
     print(f"--- Training {name} ---")
     model.to(device)
     
@@ -158,6 +186,8 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
     warmup_steps = max(1, int(0.05 * total_steps))
     
     scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps, 3e-5, args.lr)
+
+    history_records = []
 
     for epoch in range(args.epochs):
         # Use overcomplete's implemented method for one epoch at a time to maintain our custom logging/validation
@@ -196,24 +226,54 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
                     return float(m.sum().item())
                 return m.item() if hasattr(m, 'item') else float(m)
 
+            collin_val = 0.0
+            if hasattr(model, 'get_dictionary') and callable(model.get_dictionary):
+                collin_val = float(dictionary_collinearity(model.get_dictionary())[0].item())
+            elif hasattr(model, 'dictionary'):
+                collin_val = float(dictionary_collinearity(model.dictionary)[0].item())
+
             # Compute metrics
+            r2_val = _get_val(r2_score(val_batch, val_recon))
+            l2_train = _get_val(avg_l2_loss(train_batch_subset, train_recon))
+            l2_val = _get_val(avg_l2_loss(val_batch, val_recon))
+            rel_l2_val = _get_val(relative_avg_l2_loss(val_batch, val_recon))
+            l1_tr = _get_val(l1(train_z))
+            sparsity_v = _get_val(sparsity_eps(val_z))
+            dead_c_v = _get_val(dead_codes(val_z))
+            hoyer_v = _get_val(hoyer(val_z))
+
             metrics = {
                 f"{name}/train_loss": train_loss,
                 f"{name}/lr": scheduler.get_last_lr()[0],
-                f"{name}/r2_score_val": _get_val(r2_score(val_batch, val_recon)),
-                f"{name}/avg_l2_loss_train": _get_val(avg_l2_loss(train_batch_subset, train_recon)),
-                f"{name}/avg_l2_loss_val": _get_val(avg_l2_loss(val_batch, val_recon)),
-                f"{name}/l1_train": _get_val(l1(train_z)),
-                f"{name}/sparsity_eps_val": _get_val(sparsity_eps(val_z)),
-                f"{name}/dead_codes_val": _get_val(dead_codes(val_z)),
-                f"{name}/relative_avg_l2_loss_val": _get_val(relative_avg_l2_loss(val_batch, val_recon)),
-                f"{name}/hoyer_val": _get_val(hoyer(val_z)),
+                f"{name}/r2_score_val": r2_val,
+                f"{name}/avg_l2_loss_train": l2_train,
+                f"{name}/avg_l2_loss_val": l2_val,
+                f"{name}/l1_train": l1_tr,
+                f"{name}/sparsity_eps_val": sparsity_v,
+                f"{name}/dead_codes_val": dead_c_v,
+                f"{name}/relative_avg_l2_loss_val": rel_l2_val,
+                f"{name}/hoyer_val": hoyer_v,
+                f"{name}/dictionary_collinearity_val": collin_val,
             }
-            
-            if hasattr(model, 'get_dictionary') and callable(model.get_dictionary):
-                metrics[f"{name}/dictionary_collinearity_val"] = dictionary_collinearity(model.get_dictionary())[0]
-            elif hasattr(model, 'dictionary'):
-                metrics[f"{name}/dictionary_collinearity_val"] = dictionary_collinearity(model.dictionary)[0]
+
+            # Epoch record for CSV history
+            epoch_record = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "model_name": name,
+                "epoch": epoch + 1,
+                "train_loss": round(train_loss, 6),
+                "lr": scheduler.get_last_lr()[0],
+                "r2_score_val": round(r2_val, 6),
+                "avg_l2_loss_train": round(l2_train, 6),
+                "avg_l2_loss_val": round(l2_val, 6),
+                "relative_avg_l2_loss_val": round(rel_l2_val, 6),
+                "l1_train": round(l1_tr, 6),
+                "sparsity_eps_val": round(sparsity_v, 4),
+                "dead_codes_val": round(dead_c_v, 4),
+                "hoyer_val": round(hoyer_v, 6),
+                "dictionary_collinearity_val": round(collin_val, 6),
+            }
+            history_records.append(epoch_record)
 
             if logger:
                 if args.logger == "wandb":
@@ -222,8 +282,41 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger):
                     for k, v in metrics.items():
                         logger.add_scalar(k, v, epoch)
 
-        if (epoch + 1) % 10 == 0:
+        if (epoch + 1) % 10 == 0 or epoch == args.epochs - 1:
             print(f"Epoch {epoch+1}/{args.epochs} - Validation R2: {metrics[f'{name}/r2_score_val']:.4f}")
+
+    # Write training history to CSV
+    if results_dir:
+        history_csv = os.path.join(results_dir, "sae_training_history.csv")
+        save_records_to_csv(history_csv, history_records)
+
+        # Write summary row for this model to CSV
+        if history_records:
+            last_rec = history_records[-1]
+            best_r2 = max(r["r2_score_val"] for r in history_records)
+            best_l2 = min(r["avg_l2_loss_val"] for r in history_records)
+            summary_record = [{
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "model_name": name,
+                "total_epochs": args.epochs,
+                "k": args.k,
+                "expansion_factor": args.expansion_factor,
+                "block_size": getattr(args, "block_size", 4) if "BSF" in name else 1,
+                "lr": args.lr,
+                "batch_size": args.batch_size,
+                "final_train_loss": last_rec["train_loss"],
+                "final_r2_val": last_rec["r2_score_val"],
+                "best_r2_val": best_r2,
+                "final_avg_l2_val": last_rec["avg_l2_loss_val"],
+                "best_avg_l2_val": best_l2,
+                "final_relative_l2_val": last_rec["relative_avg_l2_loss_val"],
+                "final_sparsity_val": last_rec["sparsity_eps_val"],
+                "final_dead_codes_val": last_rec["dead_codes_val"],
+                "final_hoyer_val": last_rec["hoyer_val"],
+                "final_collinearity_val": last_rec["dictionary_collinearity_val"],
+            }]
+            summary_csv = os.path.join(results_dir, "sae_summary.csv")
+            save_records_to_csv(summary_csv, summary_record)
 
     return model
 
@@ -330,7 +423,7 @@ def main(args):
         for name in target_models:
             print(f"\nInstantiating {name}...")
             sae = build_model(name)
-            trained = train_sae(sae, name, train_features, val_features, args, device, logger)
+            trained = train_sae(sae, name, train_features, val_features, args, device, logger, results_dir=args.results_dir)
             trained_models[name] = trained
             
             checkpoint_path = os.path.join(checkpoint_dir, f"{name}_sae.pt")
@@ -372,6 +465,7 @@ def main(args):
     names = list(all_dictionaries.keys())
     print(f"Available dictionaries for comparison: {names}")
     
+    comparison_records = []
     if len(names) < 2:
         print("Note: Less than 2 models available for pairwise comparison.")
     else:
@@ -389,6 +483,14 @@ def main(args):
                         print(f"  Hungarian Loss: {h_loss:.4f}")
                         print(f"  Cosine Hungarian Loss: {ch_loss:.4f}")
                         
+                        comparison_records.append({
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "model_1": n1,
+                            "model_2": n2,
+                            "hungarian_loss": round(float(h_loss), 6),
+                            "cosine_hungarian_loss": round(float(ch_loss), 6),
+                        })
+
                         if logger:
                             comp_name = f"{n1}_vs_{n2}"
                             metrics = {
@@ -404,6 +506,10 @@ def main(args):
                         print(f"Comparison {n1} vs {n2} skipped due to error: {e}")
                 else:
                     print(f"Comparison {n1} ({d1.shape}) vs {n2} ({d2.shape}): Shapes differ, skipping Hungarian loss.")
+
+    if comparison_records and args.results_dir:
+        comp_csv = os.path.join(args.results_dir, "sae_dictionary_comparisons.csv")
+        save_records_to_csv(comp_csv, comparison_records)
 
     if args.logger == "wandb":
         wandb.finish()
@@ -424,6 +530,8 @@ if __name__ == "__main__":
     parser.add_argument("--expansion_factor", type=float, default=4.0, help="Expansion factor for dictionary size")
     parser.add_argument("--block_size", type=int, default=4, help="Block size for Block-Sparse Featurizers (BSF)")
     parser.add_argument("--logger", type=str, choices=["wandb", "tensorboard", "none"], default="wandb", help="Logger to use")
+    parser.add_argument("--results_dir", type=str, default="./interpretability_analysis/results",
+                        help="Directory to save CSV logs and summaries")
     parser.add_argument("--weight_checkpoint", type=str, default="./weights/rcnn_best_anchors/best_checkpoint.pth", help="Path to weights checkpoint")
     
     args = parser.parse_args()
