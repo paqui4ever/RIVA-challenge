@@ -128,6 +128,9 @@ class VanillaBSF(BSF):
         self.W_enc = nn.Parameter(W.t().clone())
         self.b_enc = nn.Parameter(torch.zeros(n_groups * group_size))
 
+    def decoder_atoms(self) -> torch.Tensor:
+        return unit_blocks(self.W_dec, self.n_groups, self.group_size)
+
     def preact(self, x: torch.Tensor) -> torch.Tensor:
         a = x @ self.W_enc + self.b_enc
         return rearrange(a, 'n (g s) -> n g s', g=self.n_groups, s=self.group_size)

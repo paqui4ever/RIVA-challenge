@@ -159,8 +159,23 @@ def get_lr_scheduler(optimizer, warmup_steps, total_steps, initial_lr, base_lr):
         milestones=[warmup_steps]
     )
 
-def custom_criterion(x, x_hat, z_pre, z, dictionary):
-    return torch.nn.functional.mse_loss(x, x_hat)
+def custom_criterion(x, x_hat, z_pre, z, dictionary, k_aux=64, alpha=1/32):
+    mse = torch.nn.functional.mse_loss(x, x_hat)
+    # Apply AuxK only for standard 1D pre-code SAEs (TopKSAE / RATopKSAE)
+    if z_pre is not None and dictionary is not None and z_pre.shape == z.shape and dictionary.shape[0] == z.shape[1]:
+        dead_mask = (z == 0).all(dim=0)
+        n_dead = int(dead_mask.sum().item())
+        if n_dead > 0:
+            residual = (x - x_hat).detach()
+            z_pre_dead = z_pre[:, dead_mask]
+            dict_dead = dictionary[dead_mask]
+            k_curr = min(k_aux, n_dead)
+            vals, idx = torch.topk(z_pre_dead, k=k_curr, dim=-1)
+            z_aux = torch.zeros_like(z_pre_dead).scatter_(1, idx, torch.relu(vals))
+            res_hat = z_aux @ dict_dead
+            aux_loss = torch.nn.functional.mse_loss(residual, res_hat)
+            return mse + alpha * aux_loss
+    return mse
 
 def save_records_to_csv(filepath, records):
     """Saves or appends a list of dict records to a CSV file."""
@@ -223,17 +238,30 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
         with torch.no_grad():
             # Get full val batch for metric calculation if it fits in memory, else batched
             # For simplicity, calculate on a large subset
-            val_batch = val_tensor[:10000].to(device)
-            train_batch_subset = train_tensor[:10000].to(device)
+            val_step = max(1, len(val_tensor) // 10000)
+            train_step = max(1, len(train_tensor) // 10000)
+            val_batch = val_tensor[::val_step][:10000].to(device)
+            train_batch_subset = train_tensor[::train_step][:10000].to(device)
             
             # forward returns (z_pre, z, x_hat)
             _, val_z, val_recon = model(val_batch)
             _, train_z, train_recon = model(train_batch_subset)
 
-            def _get_val(m):
-                if hasattr(m, 'numel') and m.numel() > 1:
-                    return float(m.sum().item())
-                return m.item() if hasattr(m, 'item') else float(m)
+            def _get_mean(m):
+                if isinstance(m, torch.Tensor):
+                    return float(m.float().mean().item())
+                elif hasattr(m, 'item'):
+                    return float(m.item())
+                return float(m)
+
+            def _get_dead_count(m):
+                if isinstance(m, torch.Tensor):
+                    if m.numel() > 1:
+                        return float((m > 0).sum().item())
+                    return float(m.item())
+                elif hasattr(m, 'item'):
+                    return float(m.item())
+                return float(m)
 
             collin_val = 0.0
             dict_tensor = None
@@ -245,19 +273,19 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
             if dict_tensor is not None:
                 try:
                     c_out = dictionary_collinearity(dict_tensor)[0]
-                    collin_val = _get_val(c_out)
+                    collin_val = _get_mean(c_out)
                 except Exception as e:
                     pass
 
             # Compute metrics
-            r2_val = _get_val(r2_score(val_batch, val_recon))
-            l2_train = _get_val(avg_l2_loss(train_batch_subset, train_recon))
-            l2_val = _get_val(avg_l2_loss(val_batch, val_recon))
-            rel_l2_val = _get_val(relative_avg_l2_loss(val_batch, val_recon))
-            l1_tr = _get_val(l1(train_z))
-            sparsity_v = _get_val(sparsity_eps(val_z))
-            dead_c_v = _get_val(dead_codes(val_z))
-            hoyer_v = _get_val(hoyer(val_z))
+            r2_val = _get_mean(r2_score(val_batch, val_recon))
+            l2_train = _get_mean(avg_l2_loss(train_batch_subset, train_recon))
+            l2_val = _get_mean(avg_l2_loss(val_batch, val_recon))
+            rel_l2_val = _get_mean(relative_avg_l2_loss(val_batch, val_recon))
+            l1_tr = _get_mean(l1(train_z))
+            sparsity_v = _get_mean(sparsity_eps(val_z))
+            dead_c_v = _get_dead_count(dead_codes(val_z))
+            hoyer_v = _get_mean(hoyer(val_z))
 
             metrics = {
                 f"{name}/train_loss": train_loss,
@@ -423,6 +451,18 @@ def main(args):
     checkpoint_dir = "./interpretability_analysis/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
+    if os.path.exists(points_path):
+        init_points = torch.load(points_path, map_location=device, weights_only=False)
+    else:
+        # Filter out low-energy background/padding tokens (top 70% by L2 norm)
+        norms = train_features.norm(dim=-1)
+        valid_idx = torch.where(norms > torch.quantile(norms[:100000], 0.30))[0]
+        g = torch.Generator().manual_seed(42)
+        perm = valid_idx[torch.randperm(len(valid_idx), generator=g)[:1024]]
+        init_points = train_features[perm].clone()
+        torch.save(init_points.cpu(), points_path)
+
     available_models = [
         "TopKSAE",
         "RATopKSAE",
@@ -437,7 +477,7 @@ def main(args):
         if model_name == "TopKSAE":
             return TopKSAE(input_dim, hidden_dim, top_k=args.k, device=dev_str)
         elif model_name == "RATopKSAE":
-            return RATopKSAE(input_dim, hidden_dim, points=train_features[:1024].to(device), top_k=args.k, device=dev_str)
+            return RATopKSAE(input_dim, hidden_dim, points=init_points.to(device), top_k=args.k, device=dev_str)
         elif model_name == "MPSAE":
             return MPSAE(input_dim, hidden_dim, k=args.k, device=dev_str)
         elif model_name == "OMPSAE":

@@ -130,10 +130,28 @@ def main(args):
     hidden_dim = int(input_dim * args.expansion_factor)
     print(f"SAE Input Dim: {input_dim}, Hidden Dim: {hidden_dim}")
 
+    # Load RATopK anchor points if needed
+    loaded_points = None
+    if args.sae_type == "RATopKSAE":
+        points_path = "./interpretability_analysis/checkpoints/ratopk_points.pt"
+        if os.path.exists(points_path):
+            print(f"Loading RATopK anchor points from {points_path}")
+            loaded_points = torch.load(points_path, map_location=device, weights_only=False)
+        else:
+            feat_path = "./interpretability_analysis/features/train_features.pt"
+            if os.path.exists(feat_path):
+                print(f"Sampling RATopK anchor points from {feat_path}")
+                feats = torch.load(feat_path, map_location=device, weights_only=False)
+                step = max(1, len(feats) // 1024)
+                loaded_points = feats[::step][:1024].clone()
+            else:
+                print("Warning: Anchor points and train_features not found, falling back to random points")
+                loaded_points = torch.randn(1024, input_dim, device=device)
+
     # 3. Initialize and Load SAE
     sae_classes = {
         "TopKSAE": lambda d, h, k: TopKSAE(d, h, top_k=k),
-        "RATopKSAE": lambda d, h, k: RATopKSAE(d, h, points=torch.randn(1024, d), top_k=k),
+        "RATopKSAE": lambda d, h, k: RATopKSAE(d, h, points=loaded_points.to(device), top_k=k),
         "MPSAE": lambda d, h, k: MPSAE(d, h, k=k),
         "OMPSAE": lambda d, h, k: OMPSAE(d, h, k=k),
         # Block-Sparse Featurizers (Goodfire AI: https://github.com/goodfire-ai/block-sparse-featurizer)
@@ -145,6 +163,7 @@ def main(args):
         raise ValueError(f"Unknown SAE type: {args.sae_type}")
 
     sae_model = sae_classes[args.sae_type](input_dim, hidden_dim, k=args.k)
+    sae_model.to(device)
     
     checkpoint_path = args.checkpoint
     if not checkpoint_path:
@@ -152,11 +171,10 @@ def main(args):
     
     if os.path.exists(checkpoint_path):
         print(f"Loading SAE checkpoint from {checkpoint_path}")
-        sae_model.load_state_dict(torch.load(checkpoint_path, map_location="cpu", weights_only=False))
+        sae_model.load_state_dict(torch.load(checkpoint_path, map_location=device, weights_only=False))
     else:
         print(f"Warning: SAE checkpoint {checkpoint_path} not found. Using untrained SAE.")
     
-    sae_model.to(device)
     sae_model.eval()
 
     # 4. Extract Images and Heatmaps
