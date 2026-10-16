@@ -191,11 +191,14 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
     total_steps = args.epochs * steps_per_epoch
     warmup_steps = max(1, int(0.05 * total_steps))
     
+    print(f"Training info: {len(train_dataset):,} samples | Batch size: {args.batch_size} | Steps per epoch: {steps_per_epoch:,} | Total epochs: {args.epochs}", flush=True)
+
     scheduler = get_lr_scheduler(optimizer, warmup_steps, total_steps, 3e-5, args.lr)
 
     history_records = []
 
     for epoch in range(args.epochs):
+        print(f"\n[Epoch {epoch+1}/{args.epochs}] Running {steps_per_epoch:,} steps...", flush=True)
         # Use overcomplete's implemented method for one epoch at a time to maintain our custom logging/validation
         logs = lib_train_sae(
             model=model,
@@ -460,6 +463,9 @@ def main(args):
         args.epochs = 2
         train_features = train_features[:1000]
         val_features = val_features[:500]
+    elif args.max_samples and args.max_samples > 0:
+        print(f"\nSubsetting training features to {args.max_samples:,} samples (from {len(train_features):,}).")
+        train_features = train_features[:args.max_samples]
 
     # Determine which models to train
     if "all" in args.models:
@@ -575,8 +581,9 @@ if __name__ == "__main__":
     parser.add_argument("--compare_only", action="store_true",
                         help="Skip training and run dictionary comparison on existing checkpoints.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=500, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=4096, help="Batch size (default: 4096 for 1D feature vectors)")
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs (default: 10)")
+    parser.add_argument("--max_samples", type=int, default=0, help="Optional cap on training activations (e.g. 500000). 0 = all.")
     parser.add_argument("--k", type=int, default=16, help="Target sparsity (L0 / k)")
     parser.add_argument("--expansion_factor", type=float, default=4.0, help="Expansion factor for dictionary size")
     parser.add_argument("--block_size", type=int, default=4, help="Block size for Block-Sparse Featurizers (BSF)")
