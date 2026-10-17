@@ -99,18 +99,20 @@ def main(args):
     sam3_model = build_sam3_fasterrcnn(trainable_backbone=False)
     
     # Load weights
-    weight_dir = Path("./weights")
-    weight_files = list(weight_dir.glob("*.pt")) + list(weight_dir.glob("*.pth"))
-    if weight_files:
-        sam3_weights = [w for w in weight_files if "sam3" in w.name.lower()]
-        best_weight = sam3_weights[0] if sam3_weights else weight_files[0]
-        print(f"Found SAM3 weights: {best_weight}. Loading...")
-        state_dict = torch.load(best_weight, map_location="cpu", weights_only=False)
+    ckpt_to_load = args.weight_checkpoint
+    if not (ckpt_to_load and os.path.exists(ckpt_to_load)):
+        weight_dir = Path("./weights")
+        weight_files = list(weight_dir.rglob("*.pt")) + list(weight_dir.rglob("*.pth"))
+        ckpt_to_load = str(weight_files[0]) if weight_files else None
+
+    if ckpt_to_load and os.path.exists(ckpt_to_load):
+        print(f"Found SAM3 Faster R-CNN weights: {ckpt_to_load}. Loading...")
+        state_dict = torch.load(ckpt_to_load, map_location="cpu", weights_only=False)
         if "model_state_dict" in state_dict:
             state_dict = state_dict["model_state_dict"]
         sam3_model.load_state_dict(state_dict, strict=False)
     else:
-        print("Warning: No SAM3 weights found. Using initialized weights.")
+        print(f"Warning: No weights found at {args.weight_checkpoint}. Using initialized weights.")
 
     sam3_model.to(device)
     sam3_model.eval()
@@ -268,6 +270,8 @@ if __name__ == "__main__":
     parser.add_argument("--visualizations", nargs="+", default=["overlay", "evidence", "zoom", "contour", "manifold"], 
                         choices=["overlay", "evidence", "zoom", "contour", "manifold"], help="Visualization methods to run")
     parser.add_argument("--save_dir", type=str, default="./interpretability_analysis/visualizations", help="Directory to save the visualizations")
+    parser.add_argument("--weight_checkpoint", type=str, default="./weights/rcnn_best_anchors/best_checkpoint.pth",
+                        help="Path to SAM3 Faster R-CNN weights checkpoint")
     
     args = parser.parse_args()
     main(args)

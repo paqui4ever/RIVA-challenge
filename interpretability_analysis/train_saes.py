@@ -194,6 +194,11 @@ def save_records_to_csv(filepath, records):
 def train_sae(model, name, train_tensor, val_tensor, args, device, logger, results_dir="./interpretability_analysis/results"):
     print(f"--- Training {name} ---")
     model.to(device)
+
+    if logger and args.logger == "wandb":
+        import wandb
+        wandb.define_metric(f"{name}/epoch")
+        wandb.define_metric(f"{name}/*", step_metric=f"{name}/epoch")
     
     train_dataset = TensorDataset(train_tensor)
     val_dataset = TensorDataset(val_tensor)
@@ -288,6 +293,7 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
             hoyer_v = _get_mean(hoyer(val_z))
 
             metrics = {
+                f"{name}/epoch": epoch + 1,
                 f"{name}/train_loss": train_loss,
                 f"{name}/lr": scheduler.get_last_lr()[0],
                 f"{name}/r2_score_val": r2_val,
@@ -322,7 +328,7 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
 
             if logger:
                 if args.logger == "wandb":
-                    logger.log(metrics, step=epoch)
+                    logger.log(metrics)
                 elif args.logger == "tensorboard":
                     for k, v in metrics.items():
                         logger.add_scalar(k, v, epoch)
