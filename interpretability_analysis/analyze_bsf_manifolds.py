@@ -103,13 +103,15 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
     all_images = []
     all_z_norm = []
     all_z_blocks = []
-    all_fg_mask = []
+    all_valid_mask = []
     all_od = []
     all_hue = []
     all_grad = []
     all_img_indices = []
     all_cy = []
     all_cx = []
+    all_r_grid = []
+    all_c_grid = []
 
     H_feat, W_feat = None, None
     img_counter = 0
@@ -138,11 +140,19 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
                 z_norm = z
             all_z_norm.append(z_norm.cpu())
 
-            # 3. Compute foreground mask: mean RGB intensity > 0.05
+            # 3. Define valid non-padded slide tokens (valid_mask):
+            # Token mean_rgb > 0.08 AND token is not on the 1-token outer perimeter (1 <= r < H-1, 1 <= c < W-1)
             mean_rgb = batch_dev.mean(dim=1, keepdim=True)
-            mean_rgb_pooled = F.adaptive_avg_pool2d(mean_rgb, (H_feat, W_feat))
-            fg_mask = (mean_rgb_pooled > 0.05).squeeze(1).view(-1)
-            all_fg_mask.append(fg_mask.cpu())
+            mean_rgb_pooled = F.adaptive_avg_pool2d(mean_rgb, (H_feat, W_feat)).squeeze(1).view(-1)
+
+            r_coords = torch.arange(H_feat, device=device)
+            c_coords = torch.arange(W_feat, device=device)
+            grid_r, grid_c = torch.meshgrid(r_coords, c_coords, indexing='ij')
+            inner_mask = (grid_r >= 1) & (grid_r < H_feat - 1) & (grid_c >= 1) & (grid_c < W_feat - 1)
+            inner_mask_batch = inner_mask.reshape(-1).repeat(B)
+
+            valid_mask = (mean_rgb_pooled > 0.08) & inner_mask_batch
+            all_valid_mask.append(valid_mask.cpu())
 
             # 4. Proxy 1: Optical density (mean inverse grayscale)
             gray = 0.2989 * batch_dev[:, 0:1] + 0.5870 * batch_dev[:, 1:2] + 0.1140 * batch_dev[:, 2:3]
@@ -164,7 +174,7 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
             grad_pooled = F.adaptive_avg_pool2d(grad_mag, (H_feat, W_feat)).squeeze(1).view(-1)
             all_grad.append(grad_pooled.cpu())
 
-            # 7. Spatial pixel centers on 1008x1008 image
+            # 7. Spatial pixel centers on 1008x1008 image & grid coordinates
             stride = 1008.0 / H_feat
             y_coords = ((torch.arange(H_feat, device=device) + 0.5) * stride).long()
             x_coords = ((torch.arange(W_feat, device=device) + 0.5) * stride).long()
@@ -179,6 +189,8 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
             all_img_indices.append(batch_img_idx.cpu())
             all_cy.append(batch_cy.cpu())
             all_cx.append(batch_cx.cpu())
+            all_r_grid.append(grid_r.reshape(-1).repeat(B).cpu())
+            all_c_grid.append(grid_c.reshape(-1).repeat(B).cpu())
 
             img_counter += B
 
@@ -187,25 +199,52 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
     images_tensor = torch.cat(all_images, dim=0)       # (N_img, 3, 1008, 1008)
     z_norm_tensor = torch.cat(all_z_norm, dim=0)       # (N_tokens, G)
     z_blocks_tensor = torch.cat(all_z_blocks, dim=0) if is_bsf else None
-    fg_mask_tensor = torch.cat(all_fg_mask, dim=0)     # (N_tokens,)
+    valid_mask_tensor = torch.cat(all_valid_mask, dim=0) # (N_tokens,)
     od_tensor = torch.cat(all_od, dim=0)               # (N_tokens,)
     hue_tensor = torch.cat(all_hue, dim=0)             # (N_tokens,)
     grad_tensor = torch.cat(all_grad, dim=0)           # (N_tokens,)
     img_idx_tensor = torch.cat(all_img_indices, dim=0) # (N_tokens,)
     cy_tensor = torch.cat(all_cy, dim=0)               # (N_tokens,)
     cx_tensor = torch.cat(all_cx, dim=0)               # (N_tokens,)
+    r_grid_tensor = torch.cat(all_r_grid, dim=0)       # (N_tokens,)
+    c_grid_tensor = torch.cat(all_c_grid, dim=0)       # (N_tokens,)
+
+    # Cytological masks within valid_mask:
+    valid_mask_np = valid_mask_tensor.numpy()
+    od_np = od_tensor.numpy()
+    grad_np = grad_tensor.numpy()
+
+    if valid_mask_np.any():
+        od_thresh = float(np.percentile(od_np[valid_mask_np], 65.0))
+        grad_thresh = float(np.percentile(grad_np[valid_mask_np], 65.0))
+        cell_fg_mask_np = valid_mask_np & ((od_np > od_thresh) | (grad_np > grad_thresh))
+    else:
+        cell_fg_mask_np = np.zeros_like(valid_mask_np, dtype=bool)
+
+    slide_bg_mask_np = valid_mask_np & (~cell_fg_mask_np)
+
+    cell_fg_mask_tensor = torch.from_numpy(cell_fg_mask_np)
+    slide_bg_mask_tensor = torch.from_numpy(slide_bg_mask_np)
+
+    print(f"[INFO] Tokens total: {len(valid_mask_np)}, Valid slide tokens: {int(valid_mask_np.sum())} ({valid_mask_np.mean()*100:.1f}%)")
+    print(f"[INFO] Cellular foreground: {int(cell_fg_mask_np.sum())} ({cell_fg_mask_np.mean()*100:.1f}%), Slide background: {int(slide_bg_mask_np.sum())} ({slide_bg_mask_np.mean()*100:.1f}%)")
 
     return {
         "images": images_tensor,
         "z_norm": z_norm_tensor,
         "z_blocks": z_blocks_tensor,
-        "fg_mask": fg_mask_tensor,
+        "valid_mask": valid_mask_tensor,
+        "cell_fg_mask": cell_fg_mask_tensor,
+        "slide_bg_mask": slide_bg_mask_tensor,
+        "fg_mask": cell_fg_mask_tensor,
         "optical_density": od_tensor,
         "color_hue": hue_tensor,
         "gradient_energy": grad_tensor,
         "img_indices": img_idx_tensor,
         "cy": cy_tensor,
         "cx": cx_tensor,
+        "r_grid": r_grid_tensor,
+        "c_grid": c_grid_tensor,
         "grid_size": H_feat,
         "is_bsf": is_bsf
     }
@@ -213,12 +252,14 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
 
 def rank_and_save_concepts(data, sae_type, save_dir):
     """
-    Ranks learned concepts/blocks on foreground tokens according to sparsity,
+    Ranks learned concepts/blocks on valid slide tokens according to sparsity,
     foreground selectivity, effective rank, and correlation with cytological proxies.
     Saves full ranking table to CSV and returns top recommended concept IDs.
     """
     z_norm = data["z_norm"].numpy()
-    fg_mask = data["fg_mask"].numpy()
+    valid_mask = data["valid_mask"].numpy()
+    cell_fg_mask = data["cell_fg_mask"].numpy()
+    slide_bg_mask = data["slide_bg_mask"].numpy()
     is_bsf = data["is_bsf"]
     z_blocks = data["z_blocks"].numpy() if is_bsf else None
 
@@ -227,25 +268,26 @@ def rank_and_save_concepts(data, sae_type, save_dir):
     grad = data["gradient_energy"].numpy()
 
     num_concepts = z_norm.shape[1]
-    N_fg = int(fg_mask.sum())
-    N_bg = int((~fg_mask).sum())
+    N_valid = int(valid_mask.sum())
 
     records = []
 
     for g in range(num_concepts):
-        act_mask = (z_norm[:, g] > 1e-6)
-        act_fg = act_mask & fg_mask
-        n_act_fg = int(act_fg.sum())
-        active_freq = float(n_act_fg / max(1, N_fg))
+        act = z_norm[:, g]
+        act_mask = (act > 1e-6)
+        act_valid = act_mask & valid_mask
+        n_act_valid = int(act_valid.sum())
+        active_freq = float(n_act_valid / max(1, N_valid))
 
-        mean_fg = float(z_norm[fg_mask, g].mean()) if N_fg > 0 else 0.0
-        mean_bg = float(z_norm[~fg_mask, g].mean()) if N_bg > 0 else 0.0
-        fg_selectivity = float((mean_fg + 1e-6) / (mean_bg + 1e-6))
-        max_act = float(z_norm[fg_mask, g].max()) if N_fg > 0 else 0.0
+        fg_mean = float(act[cell_fg_mask].mean()) if cell_fg_mask.any() else 0.0
+        bg_mean = float(act[slide_bg_mask].mean()) if slide_bg_mask.any() else 0.0
+        global_mean = float(act[valid_mask].mean()) + 1e-4 if valid_mask.any() else 1e-4
+        foreground_selectivity = (fg_mean + 0.05 * global_mean) / (bg_mean + 0.05 * global_mean)
+        max_act = float(act[valid_mask].max()) if valid_mask.any() else 0.0
 
         # Effective rank via singular values
-        if is_bsf and n_act_fg >= 4:
-            Z_act = z_blocks[act_fg, g, :]
+        if is_bsf and n_act_valid >= 4:
+            Z_act = z_blocks[act_valid, g, :]
             s = np.linalg.svd(Z_act, compute_uv=False)
             if len(s) < 4:
                 s = np.pad(s, (0, 4 - len(s)), constant_values=1e-8)
@@ -259,43 +301,47 @@ def rank_and_save_concepts(data, sae_type, save_dir):
         else:
             erank = 1.0
 
-        # Correlations with cytological proxies
-        if n_act_fg >= 3:
+        # Correlations with cytological proxies computed over valid_mask
+        if n_act_valid >= 3:
             if is_bsf:
-                Z_act = z_blocks[act_fg, g, :]
+                Z_act = z_blocks[act_valid, g, :]
                 Z_cent = Z_act - Z_act.mean(axis=0, keepdims=True)
                 _, _, Vt = np.linalg.svd(Z_cent, full_matrices=False)
                 proj_pc1 = Z_cent @ Vt[0].T
                 ref_feature = proj_pc1
             else:
-                ref_feature = z_norm[act_fg, g]
+                ref_feature = act[act_valid]
 
-            corr_od = safe_corr(ref_feature, od[act_fg])
-            corr_hue = safe_corr(ref_feature, hue[act_fg])
-            corr_grad = safe_corr(ref_feature, grad[act_fg])
+            corr_optical_density = safe_corr(ref_feature, od[act_valid])
+            corr_color_hue = safe_corr(ref_feature, hue[act_valid])
+            corr_gradient_energy = safe_corr(ref_feature, grad[act_valid])
         else:
-            corr_od, corr_hue, corr_grad = 0.0, 0.0, 0.0
+            corr_optical_density, corr_color_hue, corr_gradient_energy = 0.0, 0.0, 0.0
 
-        # Ranking score and filter
+        # Cytological salience alignment and ranking
+        pos_od = max(0.0, corr_optical_density)
+        pos_grad = max(0.0, corr_gradient_energy)
+        cyto_alignment = 1.5 * pos_od + 1.5 * pos_grad + 0.5 * abs(corr_color_hue)
+
         if is_bsf:
-            score = erank * np.log1p(fg_selectivity)
-            meets_filter = (0.02 <= active_freq <= 0.35) and (fg_selectivity > 2.0)
+            meets_criteria = bool((0.003 <= active_freq <= 0.25) and (erank >= 3.0) and (foreground_selectivity > 1.2) and (pos_od > 0.10 or pos_grad > 0.15))
+            composite_score = float(erank * np.log1p(foreground_selectivity) * (1.0 + cyto_alignment))
         else:
-            score = mean_fg * fg_selectivity
-            meets_filter = (0.01 <= active_freq <= 0.25) and (fg_selectivity > 2.0)
+            meets_criteria = bool((0.003 <= active_freq <= 0.25) and (foreground_selectivity > 1.2) and (pos_od > 0.10 or pos_grad > 0.15))
+            composite_score = float(np.log1p(fg_mean * 10.0) * np.log1p(foreground_selectivity) * (1.0 + cyto_alignment))
 
         records.append({
             "concept_id": g,
             "active_freq": active_freq,
-            "foreground_selectivity": fg_selectivity,
-            "mean_activation": mean_fg,
+            "foreground_selectivity": foreground_selectivity,
+            "mean_activation": fg_mean,
             "max_activation": max_act,
             "erank": erank,
-            "corr_optical_density": corr_od,
-            "corr_color_hue": corr_hue,
-            "corr_gradient_energy": corr_grad,
-            "composite_score": score,
-            "meets_criteria": meets_filter
+            "corr_optical_density": corr_optical_density,
+            "corr_color_hue": corr_color_hue,
+            "corr_gradient_energy": corr_gradient_energy,
+            "composite_score": composite_score,
+            "meets_criteria": meets_criteria
         })
 
     df = pd.DataFrame(records)
@@ -339,7 +385,7 @@ def visualize_subspace_traversals(data, sae_model, target_concepts, sae_type, n_
     images_np = data["images"].permute(0, 2, 3, 1).numpy().clip(0, 1)
     z_norm_np = data["z_norm"].numpy()
     z_blocks_np = data["z_blocks"].numpy()
-    fg_mask_np = data["fg_mask"].numpy()
+    valid_mask_np = data["valid_mask"].numpy()
 
     od_np = data["optical_density"].numpy()
     hue_np = data["color_hue"].numpy()
@@ -349,17 +395,39 @@ def visualize_subspace_traversals(data, sae_model, target_concepts, sae_type, n_
     token_cy = data["cy"].numpy()
     token_cx = data["cx"].numpy()
 
+    H_img, W_img = images_np.shape[1], images_np.shape[2]
+    pr = patch_radius
     quantiles = np.linspace(5, 95, n_quantiles)
 
     for g in target_concepts:
-        act_fg_mask = (z_norm_np[:, g] > 1e-6) & fg_mask_np
-        if act_fg_mask.sum() < 4:
-            act_fg_mask = (z_norm_np[:, g] > 1e-6)
-        if act_fg_mask.sum() == 0:
+        # Candidate tokens must activate and be in valid_mask
+        act_cand_mask = (z_norm_np[:, g] > 1e-6) & valid_mask_np
+        if act_cand_mask.sum() < 4:
+            act_cand_mask = (z_norm_np[:, g] > 1e-6)
+        if act_cand_mask.sum() == 0:
             print(f"Warning: Concept {g} has no active tokens. Skipping traversal.")
             continue
 
-        act_indices = np.where(act_fg_mask)[0]
+        cand_indices = np.where(act_cand_mask)[0]
+
+        # Require the 96x96 crop window around (cy, cx) to have min_rgb_row_mean > 0.05
+        # and min_rgb_col_mean > 0.05 (eliminates black aspect-ratio padding bars)
+        clean_indices = []
+        for idx in cand_indices:
+            img_idx = token_img_idx[idx]
+            cy = int(np.clip(token_cy[idx], pr, H_img - pr))
+            cx = int(np.clip(token_cx[idx], pr, W_img - pr))
+            crop_cand = images_np[img_idx, cy - pr : cy + pr, cx - pr : cx + pr]
+            min_row = crop_cand.mean(axis=(1, 2)).min()
+            min_col = crop_cand.mean(axis=(0, 2)).min()
+            if min_row > 0.05 and min_col > 0.05:
+                clean_indices.append(idx)
+
+        if len(clean_indices) >= 4:
+            act_indices = np.array(clean_indices, dtype=np.int64)
+        else:
+            act_indices = cand_indices  # fallback if too few crops pass filter
+
         norms_g = z_norm_np[act_indices, g]
         p50 = np.percentile(norms_g, 50.0)
         subset_indices = act_indices[norms_g >= p50]
@@ -402,23 +470,23 @@ def visualize_subspace_traversals(data, sae_model, target_concepts, sae_type, n_
                 global_token_idx = subset_indices[best_sub_idx]
 
                 img_idx = token_img_idx[global_token_idx]
-                cy = token_cy[global_token_idx]
-                cx = token_cx[global_token_idx]
+                orig_cy = token_cy[global_token_idx]
+                orig_cx = token_cx[global_token_idx]
+
+                # Clamp (cy, cx) so [cy - pr, cy + pr] and [cx - pr, cx + pr] always lie strictly within [0, H_img] and [0, W_img]
+                cy = int(np.clip(orig_cy, pr, H_img - pr))
+                cx = int(np.clip(orig_cx, pr, W_img - pr))
 
                 img_np = images_np[img_idx]
-                pr = patch_radius
-                crop = np.zeros((2 * pr, 2 * pr, 3), dtype=np.float32)
-
-                y1, y2 = max(0, cy - pr), min(1008, cy + pr)
-                x1, x2 = max(0, cx - pr), min(1008, cx + pr)
-                py1, px1 = max(0, pr - cy), max(0, pr - cx)
-                crop[py1:py1 + (y2 - y1), px1:px1 + (x2 - x1)] = img_np[y1:y2, x1:x2]
+                crop = img_np[cy - pr : cy + pr, cx - pr : cx + pr]
 
                 ax = axes[k, j]
                 ax.imshow(crop)
 
-                # Small subtle circle at token center
-                circle = patches.Circle((pr, pr), radius=3.5, edgecolor='#00ffcc', facecolor='none', linewidth=1.2, alpha=0.9)
+                # Subtle circle at actual token center relative to clamped crop
+                center_y = float(orig_cy - (cy - pr))
+                center_x = float(orig_cx - (cx - pr))
+                circle = patches.Circle((center_x, center_y), radius=3.5, edgecolor='#00ffcc', facecolor='none', linewidth=1.2, alpha=0.9)
                 ax.add_patch(circle)
                 ax.set_xticks([])
                 ax.set_yticks([])
