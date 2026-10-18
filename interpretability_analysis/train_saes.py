@@ -17,6 +17,7 @@ import torchvision.transforms.functional as TVF
 
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import custom SAM3 Faster RCNN components
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn, sam3_resize_longest_side_and_pad_square
@@ -161,20 +162,48 @@ def get_lr_scheduler(optimizer, warmup_steps, total_steps, initial_lr, base_lr):
 
 def custom_criterion(x, x_hat, z_pre, z, dictionary, k_aux=64, alpha=1/32):
     mse = torch.nn.functional.mse_loss(x, x_hat)
-    # Apply AuxK only for standard 1D pre-code SAEs (TopKSAE / RATopKSAE)
-    if z_pre is not None and dictionary is not None and z_pre.shape == z.shape and dictionary.shape[0] == z.shape[1]:
-        dead_mask = (z == 0).all(dim=0)
-        n_dead = int(dead_mask.sum().item())
-        if n_dead > 0:
-            residual = (x - x_hat).detach()
-            z_pre_dead = z_pre[:, dead_mask]
-            dict_dead = dictionary[dead_mask]
-            k_curr = min(k_aux, n_dead)
-            vals, idx = torch.topk(z_pre_dead, k=k_curr, dim=-1)
-            z_aux = torch.zeros_like(z_pre_dead).scatter_(1, idx, torch.relu(vals))
-            res_hat = z_aux @ dict_dead
-            aux_loss = torch.nn.functional.mse_loss(residual, res_hat)
-            return mse + alpha * aux_loss
+    if z_pre is not None and dictionary is not None and z_pre.shape == z.shape:
+        G = z.shape[1]
+        D_total = dictionary.shape[0]
+
+        # 1. Standard 1D SAE (TopKSAE / RATopKSAE / OMPSAE / MPSAE)
+        if D_total == G:
+            dead_mask = (z == 0).all(dim=0)
+            n_dead = int(dead_mask.sum().item())
+            if n_dead > 0:
+                residual = (x - x_hat).detach()
+                z_pre_dead = z_pre[:, dead_mask]
+                dict_dead = dictionary[dead_mask]
+                k_curr = min(k_aux, n_dead)
+                vals, idx = torch.topk(z_pre_dead, k=k_curr, dim=-1)
+                z_aux = torch.zeros_like(z_pre_dead).scatter_(1, idx, torch.relu(vals))
+                res_hat = z_aux @ dict_dead
+                aux_loss = torch.nn.functional.mse_loss(residual, res_hat)
+                return mse + alpha * aux_loss
+
+        # 2. Block-Sparse Featurizers (VanillaBSF / GrassmannianBSF)
+        elif D_total % G == 0 and D_total > G:
+            group_size = D_total // G
+            dead_mask = (z == 0).all(dim=0)
+            n_dead = int(dead_mask.sum().item())
+            if n_dead > 0:
+                residual = (x - x_hat).detach()
+                z_pre_dead = z_pre[:, dead_mask]  # (B, n_dead)
+                dict_blocks = dictionary.view(G, group_size, -1)  # (G, group_size, D)
+                dict_dead = dict_blocks[dead_mask]  # (n_dead, group_size, D)
+
+                k_curr = min(k_aux, n_dead)
+                vals, idx = torch.topk(z_pre_dead, k=k_curr, dim=-1)
+                # Gradient scaling so encoder parameters receive direct gradients from dead blocks
+                scale = torch.zeros_like(z_pre_dead).scatter_(
+                    1, idx, torch.relu(vals) / (vals.detach() + 1e-6)
+                )
+                proj_dead = torch.einsum('bd, nsd -> bns', residual, dict_dead)
+                res_blocks = torch.einsum('bns, nsd -> bnd', proj_dead, dict_dead)
+                res_hat = (res_blocks * scale.unsqueeze(-1)).sum(dim=1)
+                aux_loss = torch.nn.functional.mse_loss(residual, res_hat)
+                return mse + alpha * aux_loss
+
     return mse
 
 def save_records_to_csv(filepath, records):
