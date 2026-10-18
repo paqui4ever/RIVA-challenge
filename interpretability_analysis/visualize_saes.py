@@ -190,8 +190,20 @@ def main(args):
     out_dir = Path(args.save_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    concept_id = args.concept_id
-    print(f"Generating visualizations for Concept ID {concept_id} of {args.sae_type}...")
+    # Determine concept IDs to visualize
+    target_concept_ids = []
+    if args.concept_ids:
+        target_concept_ids.extend(args.concept_ids)
+    if args.concept_id:
+        target_concept_ids.extend(args.concept_id)
+
+    if not target_concept_ids:
+        target_concept_ids = [5]
+
+    # Deduplicate while preserving order
+    seen = set()
+    concept_ids = [c for c in target_concept_ids if not (c in seen or seen.add(c))]
+    print(f"Generating visualizations for Concept IDs: {concept_ids} ({args.sae_type})...")
 
     def save_fig(fig, filename):
         save_path = out_dir / filename
@@ -203,57 +215,60 @@ def main(args):
             plt.close()
         print(f"Saved visualization to {save_path}")
 
-    # Visualization 1: Overlay Top Heatmaps
-    if "overlay" in args.visualizations:
-        try:
-            fig_overlay = overlay_top_heatmaps(images, heatmaps, concept_id)
-            save_fig(fig_overlay, f"{args.sae_type}_concept_{concept_id}_overlay.png")
-        except Exception as e:
-            print(f"Error generating overlay_top_heatmaps: {e}")
+    imgs_np = images.permute(0, 2, 3, 1).cpu().numpy().clip(0, 1)
 
-    # Visualization 2: Evidence Top Images
-    if "evidence" in args.visualizations:
-        try:
-            fig_evidence = evidence_top_images(images, heatmaps, concept_id)
-            save_fig(fig_evidence, f"{args.sae_type}_concept_{concept_id}_evidence.png")
-        except Exception as e:
-            print(f"Error generating evidence_top_images: {e}")
+    for concept_id in concept_ids:
+        print(f"\n--- Visualizing Concept ID {concept_id} ---")
 
-    # Visualization 3: Zoom Top Images
-    if "zoom" in args.visualizations:
-        try:
-            fig_zoom = zoom_top_images(images, heatmaps, concept_id)
-            save_fig(fig_zoom, f"{args.sae_type}_concept_{concept_id}_zoom.png")
-        except Exception as e:
-            print(f"Error generating zoom_top_images: {e}")
+        # Visualization 1: Overlay Top Heatmaps
+        if "overlay" in args.visualizations:
+            try:
+                fig_overlay = overlay_top_heatmaps(images, heatmaps, concept_id)
+                save_fig(fig_overlay, f"{args.sae_type}_concept_{concept_id}_overlay.png")
+            except Exception as e:
+                print(f"Error generating overlay_top_heatmaps for concept {concept_id}: {e}")
 
-    # Visualization 4: Contour Top Image
-    if "contour" in args.visualizations:
-        try:
-            fig_contour = contour_top_image(images, heatmaps, concept_id)
-            save_fig(fig_contour, f"{args.sae_type}_concept_{concept_id}_contour.png")
-        except Exception as e:
-            print(f"Error generating contour_top_image: {e}")
+        # Visualization 2: Evidence Top Images
+        if "evidence" in args.visualizations:
+            try:
+                fig_evidence = evidence_top_images(images, heatmaps, concept_id)
+                save_fig(fig_evidence, f"{args.sae_type}_concept_{concept_id}_evidence.png")
+            except Exception as e:
+                print(f"Error generating evidence_top_images for concept {concept_id}: {e}")
 
-    # Visualization 5: 3D Manifold Geometry & Patch Overlay (BSF Specific)
-    if ("manifold" in args.visualizations or isinstance(sae_model, BSF)) and z_blocks is not None:
-        try:
-            # images: tensor [N, 3, H, W] -> numpy [N, H, W, 3] in [0, 1]
-            imgs_np = images.permute(0, 2, 3, 1).cpu().numpy().clip(0, 1)
-            save_manifold_path = str(out_dir / f"{args.sae_type}_concept_{concept_id}_manifold.png")
-            plot_block_concepts_manifold(
-                z_blocks=z_blocks.numpy(),
-                atoms=sae_model.atoms().cpu().numpy(),
-                images=imgs_np,
-                concepts=[concept_id],
-                grid_size=grid_size,
-                n_img=5,
-                save_path=save_manifold_path
-            )
-        except Exception as e:
-            print(f"Error generating plot_block_concepts_manifold: {e}")
+        # Visualization 3: Zoom Top Images
+        if "zoom" in args.visualizations:
+            try:
+                fig_zoom = zoom_top_images(images, heatmaps, concept_id)
+                save_fig(fig_zoom, f"{args.sae_type}_concept_{concept_id}_zoom.png")
+            except Exception as e:
+                print(f"Error generating zoom_top_images for concept {concept_id}: {e}")
 
-    print("Visualization complete.")
+        # Visualization 4: Contour Top Image
+        if "contour" in args.visualizations:
+            try:
+                fig_contour = contour_top_image(images, heatmaps, concept_id)
+                save_fig(fig_contour, f"{args.sae_type}_concept_{concept_id}_contour.png")
+            except Exception as e:
+                print(f"Error generating contour_top_image for concept {concept_id}: {e}")
+
+        # Visualization 5: 3D Manifold Geometry & Patch Overlay (BSF Specific)
+        if ("manifold" in args.visualizations or isinstance(sae_model, BSF)) and z_blocks is not None:
+            try:
+                save_manifold_path = str(out_dir / f"{args.sae_type}_concept_{concept_id}_manifold.png")
+                plot_block_concepts_manifold(
+                    z_blocks=z_blocks.numpy(),
+                    atoms=sae_model.atoms().cpu().numpy(),
+                    images=imgs_np,
+                    concepts=[concept_id],
+                    grid_size=grid_size,
+                    n_img=min(5, len(imgs_np)),
+                    save_path=save_manifold_path
+                )
+            except Exception as e:
+                print(f"Error generating plot_block_concepts_manifold for concept {concept_id}: {e}")
+
+    print("\nVisualization complete.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize learned concepts from trained SAEs.")
@@ -261,7 +276,10 @@ if __name__ == "__main__":
                         choices=["TopKSAE", "RATopKSAE", "MPSAE", "OMPSAE", "VanillaBSF", "GrassmannianBSF"], 
                         help="Type of SAE to visualize")
     parser.add_argument("--checkpoint", type=str, default="", help="Path to SAE checkpoint. If empty, tries default path.")
-    parser.add_argument("--concept_id", type=int, default=5, help="Concept ID to visualize")
+    parser.add_argument("--concept_ids", type=int, nargs="+", default=None,
+                        help="One or more concept IDs to visualize (e.g. --concept_ids 36 119 223)")
+    parser.add_argument("--concept_id", type=int, nargs="*", default=None,
+                        help="Concept ID(s) to visualize (alias for --concept_ids)")
     parser.add_argument("--k", type=int, default=16, help="Target sparsity (L0 / k) used during training")
     parser.add_argument("--expansion_factor", type=float, default=4.0, help="Expansion factor used during training")
     parser.add_argument("--block_size", type=int, default=4, help="Block size for Block-Sparse Featurizers (BSF)")
