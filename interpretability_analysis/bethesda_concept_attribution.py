@@ -530,9 +530,9 @@ def extract_cell_activations(
                     # For BSF: extract the 4D subspace coordinate vector at peak activation
                     subspace_coords = None
                     if is_bsf:
-                        sub_z_flat = sub_z.view(-1, num_concepts)
+                        sub_z_flat = sub_z.reshape(-1, num_concepts)
                         max_indices = sub_z_flat.argmax(dim=0)  # (num_concepts,)
-                        sub_blk_flat = z_blocks_spatial_cpu[b, r_start:r_end, c_start:c_end, :, :].view(-1, num_concepts, group_size)
+                        sub_blk_flat = z_blocks_spatial_cpu[b, r_start:r_end, c_start:c_end, :, :].reshape(-1, num_concepts, group_size)
                         cell_z_block = sub_blk_flat[max_indices, torch.arange(num_concepts), :].numpy()  # (num_concepts, group_size)
                         subspace_coords = cell_z_block
 
