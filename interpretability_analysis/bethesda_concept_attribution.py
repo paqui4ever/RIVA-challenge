@@ -701,9 +701,13 @@ def compute_bethesda_enrichment_metrics(
             row_dict[f"auroc_{c}"] = auroc_c
             row_dict[f"r_pb_{c}"] = r_pb_c
 
-            if c != "BG_EXUDATE" and selectivity_c > max_selectivity:
+            if c != "BG_EXUDATE" and selectivity_c > max_selectivity and (mean_cells + mean_bg) > 1e-4:
                 max_selectivity = selectivity_c
                 top_class = c
+
+        if (mean_cells + mean_bg) <= 1e-4:
+            top_class = "DEAD"
+            max_selectivity = 0.0
 
         # 3. Grouped Dysplasia Categories
         # HIGH_GRADE = HSIL + SCC + ASC-H
@@ -901,12 +905,22 @@ def plot_bethesda_heatmap(
     eval_classes = [c for c in PRIMARY_CLINICAL_CLASSES if f"mean_act_{c}" in df_metrics.columns]
     eval_classes.append("BG_EXUDATE")
 
+    # Filter out dead concepts (require mean activation across cells + background > 1e-4)
+    active_df = df_metrics[(df_metrics["mean_act_all_cells"] + df_metrics["mean_act_bg_exudate"]) > 1e-4].copy()
+    if len(active_df) == 0:
+        active_df = df_metrics.copy()
+
     # Select top concepts: take best 2-3 concepts per class, then fill with highest max_selectivity
     selected_concepts = []
     for c in eval_classes:
         sel_col = f"selectivity_{c}"
-        if sel_col in df_metrics.columns:
-            top_c = df_metrics.sort_values(by=sel_col, ascending=False)["concept_id"].tolist()
+        if sel_col in active_df.columns:
+            valid_c_df = active_df.copy()
+            if c == "BG_EXUDATE":
+                valid_c_df = valid_c_df[valid_c_df["mean_act_bg_exudate"] > 1e-4]
+                if len(valid_c_df) == 0:
+                    valid_c_df = active_df
+            top_c = valid_c_df.sort_values(by=sel_col, ascending=False)["concept_id"].tolist()
             count = 0
             for cid in top_c:
                 if cid not in selected_concepts:
@@ -916,7 +930,7 @@ def plot_bethesda_heatmap(
                     break
 
     # Fill remaining from top overall selectivity
-    overall_top = df_metrics.sort_values(by="max_selectivity", ascending=False)["concept_id"].tolist()
+    overall_top = active_df.sort_values(by="max_selectivity", ascending=False)["concept_id"].tolist()
     for cid in overall_top:
         if cid not in selected_concepts:
             selected_concepts.append(cid)
@@ -996,17 +1010,25 @@ def plot_top_concepts_per_class(
     eval_classes = [c for c in PRIMARY_CLINICAL_CLASSES if f"selectivity_{c}" in df_metrics.columns]
     eval_classes.append("BG_EXUDATE")
 
+    # Filter out dead concepts (require mean activation across cells + background > 1e-4)
+    active_df = df_metrics[(df_metrics["mean_act_all_cells"] + df_metrics["mean_act_bg_exudate"]) > 1e-4].copy()
+    if len(active_df) == 0:
+        active_df = df_metrics.copy()
+
     # Find #1 concept for each class
     class_top_concepts = {}
     for c in eval_classes:
         sel_col = f"selectivity_{c}"
-        if sel_col in df_metrics.columns:
-            # Require minimum cell vs bg ratio > 0.8 for cellular classes
-            valid_df = df_metrics.copy()
+        if sel_col in active_df.columns:
+            valid_df = active_df.copy()
             if c != "BG_EXUDATE":
                 valid_df = valid_df[valid_df["cell_vs_bg_ratio"] >= 0.8]
                 if len(valid_df) == 0:
-                    valid_df = df_metrics
+                    valid_df = active_df
+            else:
+                valid_df = valid_df[valid_df["mean_act_bg_exudate"] > 1e-4]
+                if len(valid_df) == 0:
+                    valid_df = active_df
             best_concept = int(valid_df.sort_values(by=sel_col, ascending=False)["concept_id"].iloc[0])
             sel_val = float(valid_df.sort_values(by=sel_col, ascending=False)[sel_col].iloc[0])
             class_top_concepts[c] = (best_concept, sel_val)

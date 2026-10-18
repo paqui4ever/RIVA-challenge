@@ -11,6 +11,12 @@ from torch import nn
 from overcomplete.sae.topk_sae import TopKSAE
 from overcomplete.sae.jump_sae import JumpSAE
 from overcomplete.sae.archetypal_dictionary import RelaxedArchetypalDictionary
+from overcomplete.sae.factory import EncoderFactory
+
+if "identity" not in EncoderFactory.list_modules():
+    @EncoderFactory.register_module("identity")
+    def create_identity_encoder(input_shape, nb_concepts, device='cpu', **kwargs):
+        return nn.Identity()
 
 
 class RATopKSAE(TopKSAE):
@@ -159,8 +165,8 @@ class MpSAE(SAE):
         # input shape must be int or length-1 tuple
         assert isinstance(input_shape, int) or len(input_shape) == 1, \
             "MpSAE Doesn't handle 3d or 4d data format."
-        if isinstance(k, int):
-            assert k > 0, "k must be a positive integer."
+        if encoder_module == "identity":
+            encoder_module = nn.Identity()
 
         super().__init__(input_shape, nb_concepts,
                          encoder_module, dictionary_params, device)
@@ -239,7 +245,10 @@ Module for Orthogonal Matching Pursuit Sparse Autoencoder (OMPSAE).
 
 import torch
 from overcomplete.sae import SAE
-from opt_utils import batched_matrix_nnls
+try:
+    from opt_utils import batched_matrix_nnls
+except ImportError:
+    from interpretability_analysis.opt_utils import batched_matrix_nnls
 
 
 class OMPSAE(SAE):
@@ -282,7 +291,8 @@ class OMPSAE(SAE):
         assert isinstance(k, int) and k > 0, "k must be a positive integer."
         if dropout is not None:
             assert 0.0 <= dropout <= 1.0, "Dropout must be in range [0, 1]."
-        assert isinstance(max_iter, int) and max_iter > 0, "max_iter must be a positive integer."
+        if encoder_module == "identity":
+            encoder_module = nn.Identity()
 
         super().__init__(input_shape, nb_concepts, encoder_module, dictionary_params, device)
         self.k = k
@@ -377,14 +387,24 @@ class OMPSAE(SAE):
 # Block-Sparse Featurizers (BSF)
 # Copied and adapted from Goodfire AI (https://github.com/goodfire-ai/block-sparse-featurizer)
 # ==============================================================================
-from block_sparse import (
-    BSF,
-    VanillaBSF,
-    GrassmannianBSF,
-    group_topk,
-    unit_blocks,
-    plot_block_concepts_manifold
-)
+try:
+    from block_sparse import (
+        BSF,
+        VanillaBSF,
+        GrassmannianBSF,
+        group_topk,
+        unit_blocks,
+        plot_block_concepts_manifold
+    )
+except ImportError:
+    from interpretability_analysis.block_sparse import (
+        BSF,
+        VanillaBSF,
+        GrassmannianBSF,
+        group_topk,
+        unit_blocks,
+        plot_block_concepts_manifold
+    )
 
 
 
