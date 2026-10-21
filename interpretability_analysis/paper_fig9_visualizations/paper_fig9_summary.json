@@ -1,0 +1,61 @@
+{
+  "sae_type": "GrassmannianBSF",
+  "directional_sae_type": "OMPSAE",
+  "n_test_images": 66,
+  "concept_blocks": [
+    {
+      "block_id": 139,
+      "description": "Dysplasia Trajectory",
+      "erank": 3.866344690322876,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 179,
+      "projection_norm": 0.4810817241668701,
+      "n_crops": 10
+    },
+    {
+      "block_id": 92,
+      "description": "PMN / Inflammatory Exudate",
+      "erank": 3.8178460597991943,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 92,
+      "projection_norm": 0.28546956181526184,
+      "n_crops": 10
+    },
+    {
+      "block_id": 75,
+      "description": "Epithelial-Inflammatory Transition",
+      "erank": 3.806220531463623,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 402,
+      "projection_norm": 0.44224414229393005,
+      "n_crops": 10
+    },
+    {
+      "block_id": 214,
+      "description": "Continuous Epithelial Manifold",
+      "erank": 3.7388336658477783,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 376,
+      "projection_norm": 0.3849808871746063,
+      "n_crops": 10
+    },
+    {
+      "block_id": 89,
+      "description": "Continuous Epithelial Manifold",
+      "erank": 3.9300522804260254,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 612,
+      "projection_norm": 0.2985699772834778,
+      "n_crops": 10
+    },
+    {
+      "block_id": 12,
+      "description": "Endocervical Honeycomb Sheets",
+      "erank": 3.950472354888916,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 796,
+      "projection_norm": 0.5446083545684814,
+      "n_crops": 10
+    }
+  ]
+}
