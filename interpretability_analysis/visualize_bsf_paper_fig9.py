@@ -33,11 +33,13 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms.functional as TVF
 from tqdm import tqdm
+from scipy.ndimage import gaussian_filter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
+import matplotlib.patheffects as pe
 
 # Add project root and interpretability_analysis to sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -62,14 +64,16 @@ from custom_saes import (
     GrassmannianBSF,
 )
 
-# Biological descriptions for verified selective blocks
+# Verified biological & clinical descriptions for selective blocks
 CONCEPT_DESCRIPTIONS: Dict[int, str] = {
-    139: "Dysplasia Trajectory",
-    92: "PMN / Inflammatory Exudate",
+    139: "Dysplasia Progression Trajectory",
+    251: "High-Grade Squamous Lesion (HSIL/SCC, AUROC=0.82)",
+    61: "Squamous Cell Carcinoma Sheets (SCC, 1.7x sel)",
+    214: "Continuous Epithelial Manifold (665x Cell/BG)",
+    12: "Endocervical Honeycomb Sheets (2.6x sel)",
+    92: "PMN / Inflammatory Exudate Manifold",
     75: "Epithelial-Inflammatory Transition",
-    214: "Continuous Epithelial Manifold",
     89: "Continuous Epithelial Manifold",
-    12: "Endocervical Honeycomb Sheets",
 }
 
 
@@ -567,23 +571,23 @@ def compute_blended_crop(
 ) -> np.ndarray:
     """Luminance-preserving smooth overlay blending matching Paper Figure 9:
     
-    1. Normalize alpha per crop: alpha = np.clip((norm_up / (p98 + 1e-8)) ** 0.85, 0, 1)
-       Zero out values below 15% of peak so unactivated background stays clean.
-    2. Convert RGB microscopy patch to clean luminance:
-       gray = 0.299 * R + 0.587 * G + 0.114 * B
-    3. Modulate manifold RGB hue by cell's grayscale luminance:
-       tinted_cell = np.clip(rgb_up * (0.35 + 0.85 * gray), 0, 1)
-    4. Blend with underlying cellular texture:
-       blended = (1.0 - 0.78 * alpha) * crop_rgb + (0.78 * alpha) * tinted_cell
+    1. Smooth alpha mask via percentile normalization and light Gaussian polish (sigma=3.5).
+    2. Convert RGB microscopy patch to grayscale luminance.
+    3. Keep cell dark nuclei and membranes crisp while imparting vivid RGB manifold color.
+    4. Blend with underlying cellular texture.
     """
-    p98 = float(np.percentile(norm_up, 98.0)) if norm_up.size > 0 else 1.0
-    alpha = np.clip((norm_up / (p98 + 1e-8)) ** 0.85, 0.0, 1.0)
-    alpha[alpha < 0.15] = 0.0
+    p99 = float(np.percentile(norm_up, 99.0)) if norm_up.size > 0 else 1.0
+    alpha = norm_up / (p99 + 1e-8)
+    alpha = gaussian_filter(np.clip(alpha, 0.0, 1.0), sigma=3.5)
+    alpha = np.where(alpha < 0.12, 0.0, alpha) ** 0.75
+    alpha = np.clip(alpha, 0.0, 1.0)[..., None]
 
+    # Vivid luminance-preserving color blend (matching BSF Paper Fig 9):
     gray = (0.299 * crop_rgb[..., 0] + 0.587 * crop_rgb[..., 1] + 0.114 * crop_rgb[..., 2])[..., None]
-    tinted_cell = np.clip(rgb_up * (0.35 + 0.85 * gray), 0.0, 1.0)
-    blended_patch = (1.0 - 0.78 * alpha[..., None]) * crop_rgb + (0.78 * alpha[..., None]) * tinted_cell
-    return np.clip(blended_patch, 0.0, 1.0)
+    # Keep cell dark nuclei and membranes crisp while imparting vivid RGB manifold color
+    vivid_rgb = np.clip(rgb_up * (0.45 + 0.75 * gray), 0.0, 1.0)
+    blended = (1.0 - 0.82 * alpha) * crop_rgb + (0.82 * alpha) * vivid_rgb
+    return np.clip(blended, 0.0, 1.0)
 
 
 # ==============================================================================
@@ -598,7 +602,8 @@ def plot_3d_concept_manifold(
     erank: float,
     block_g: int,
     sae_1d_name: str,
-    j_star: int
+    j_star: int,
+    is_combined: bool = False
 ):
     """Draws 3D concept geometry cloud u_g, tilted floor plane with 2D shadow,
     and closest 1D SAE baseline atom arrow."""
@@ -662,54 +667,60 @@ def plot_3d_concept_manifold(
         color='black', linewidth=2.4, arrow_length_ratio=0.35, zorder=14
     )
 
-    # Label near 1D atom arrow tip
+    # Label near 1D atom arrow tip with white stroke halo for 100% legibility
     ax3d.text(
         p_end[0] * 1.06, p_end[1] * 1.06, p_end[2] * 1.06,
-        f"1D SAE C{j_star}", color='black', fontsize=8.5, fontweight='bold', zorder=16
+        f"1D SAE C{j_star}",
+        color='black', fontsize=9.0, fontweight='bold', zorder=20,
+        path_effects=[pe.withStroke(linewidth=2.5, foreground='white')]
     )
 
     # Camera angle and aesthetics
     ax3d.view_init(elev=22, azim=-55)
     ax3d.set_axis_off()
 
-    desc = CONCEPT_DESCRIPTIONS.get(block_g, "")
-    desc_str = f" - {desc}" if desc else ""
-    title_text = f"Block C{block_g}{desc_str}\n(erank={erank:.2f}, match: {sae_1d_name} C{j_star})"
-    ax3d.set_title(title_text, fontsize=10.5, fontweight='bold', pad=2)
+    if is_combined:
+        desc = CONCEPT_DESCRIPTIONS.get(block_g, "")
+        desc_line = f"Block C{block_g}: {desc}" if desc else f"Block C{block_g}"
+        title_text = f"{desc_line}\nConcept Geometry u_g (erank={erank:.2f}, 1D match: {sae_1d_name} C{j_star})"
+        ax3d.set_title(title_text, fontsize=9.5, fontweight='bold', pad=-4)
+    else:
+        title_text = f"Concept Geometry u_g\n(erank={erank:.2f}, 1D match: {sae_1d_name} C{j_star})"
+        ax3d.set_title(title_text, fontsize=10.5, fontweight='bold', pad=-5)
 
 
 def render_block_panel_to_subgridspec(
     fig: plt.Figure,
     gs_parent: gridspec.SubplotSpec,
     block_info: Dict,
-    crop_size: int = 256
+    crop_size: int = 256,
+    is_combined: bool = True
 ):
     """Renders one block's Figure 9 panel into a SubplotSpec:
-    - Left: 2x5 grid of blended 256x256 test crops with thin black frame.
+    - Left: 2x5 grid of blended 256x256 test crops with wspace=0.02, hspace=0.02 and aspect='equal'.
     - Right: 3D manifold geometry cloud + floor shadow + 1D arrow.
     """
-    # Create 1 row x 2 columns sub-gridspec: Left (crops), Right (3D)
+    # 2 rows x 7 cols: Cols 0..4 for 2x5 crops, Col 5 spacer, Col 6 for 3D plot
     gs = gridspec.GridSpecFromSubplotSpec(
-        1, 2, subplot_spec=gs_parent, width_ratios=[1.38, 1.0], wspace=0.12
-    )
-
-    # Left: 2 rows x 5 columns thumbnail grid
-    gs_left = gridspec.GridSpecFromSubplotSpec(
-        2, 5, subplot_spec=gs[0], wspace=0.03, hspace=0.03
+        2, 7, subplot_spec=gs_parent,
+        width_ratios=[1, 1, 1, 1, 1, 0.12, 2.3],
+        height_ratios=[1, 1],
+        wspace=0.02, hspace=0.02
     )
 
     blended_crops = block_info["blended_crops"]
     for idx in range(10):
         row = idx // 5
         col = idx % 5
-        ax = fig.add_subplot(gs_left[row, col])
+        ax = fig.add_subplot(gs[row, col])
 
         if idx < len(blended_crops):
             ax.imshow(blended_crops[idx])
         else:
-            # Clean dark placeholder if fewer than 10 active crops found
+            # Clean light placeholder if fewer than 10 active crops found
             ax.imshow(np.ones((crop_size, crop_size, 3), dtype=np.float32) * 0.95)
 
+        ax.set_aspect('equal')
         ax.set_xticks([])
         ax.set_yticks([])
         # Thin crisp black border around each crop
@@ -718,8 +729,8 @@ def render_block_panel_to_subgridspec(
             spine.set_linewidth(1.0)
             spine.set_visible(True)
 
-    # Right: 3D manifold scatter
-    ax3d = fig.add_subplot(gs[1], projection='3d')
+    # Right: 3D manifold scatter spanning both rows in column 6
+    ax3d = fig.add_subplot(gs[:, 6], projection='3d')
     plot_3d_concept_manifold(
         ax3d=ax3d,
         u_g=block_info["u_g"],
@@ -728,7 +739,8 @@ def render_block_panel_to_subgridspec(
         erank=block_info["erank"],
         block_g=block_info["block_g"],
         sae_1d_name=block_info["sae_1d_name"],
-        j_star=block_info["j_star"]
+        j_star=block_info["j_star"],
+        is_combined=is_combined
     )
 
 
@@ -809,21 +821,28 @@ def process_block(
         img_np = images_tensor[img_idx].permute(1, 2, 0).numpy()  # (1008, 1008, 3)
         z_img = z_blocks_tensor[img_idx, ..., g, :].numpy()       # (H_feat, W_feat, group_size)
 
+        d = D_g.shape[1]
         c_img = z_img @ D_g                                       # (H_feat, W_feat, d)
-        u_img = (c_img - mean) @ comps.T                          # (H_feat, W_feat, 3)
-        rgb_img = colorize(u_img)                                 # (H_feat, W_feat, 3)
         norm_img = np.linalg.norm(c_img, axis=-1)                 # (H_feat, W_feat)
 
-        # Smooth bicubic upsample to target_size (1008x1008)
+        # 2D spatial Gaussian smoothing on feature maps to eliminate pixelated checkerboard dots:
+        c_smooth = gaussian_filter(c_img, sigma=(1.15, 1.15, 0.0))
+        norm_smooth = gaussian_filter(norm_img, sigma=1.15)
+
+        # Project smoothed contribution field onto 3 PCA axes:
+        proj_img = (c_smooth.reshape(-1, d) - mean) @ comps.T
+        rgb_img = colorize(proj_img).reshape(H_feat, W_feat, 3)
+
+        # Smooth bilinear upsample to target_size (1008x1008) without ringing artifacts:
         rgb_t = torch.from_numpy(rgb_img).permute(2, 0, 1).unsqueeze(0).float()
-        norm_t = torch.from_numpy(norm_img).unsqueeze(0).unsqueeze(0).float()
+        norm_t = torch.from_numpy(norm_smooth).unsqueeze(0).unsqueeze(0).float()
 
         rgb_up_full = F.interpolate(
-            rgb_t, size=(target_size, target_size), mode='bicubic', align_corners=False
+            rgb_t, size=(target_size, target_size), mode='bilinear', align_corners=False
         ).squeeze(0).permute(1, 2, 0).numpy()
 
         norm_up_full = F.interpolate(
-            norm_t, size=(target_size, target_size), mode='bicubic', align_corners=False
+            norm_t, size=(target_size, target_size), mode='bilinear', align_corners=False
         ).squeeze(0).squeeze(0).numpy()
 
         img_overlays[img_idx] = {
@@ -891,7 +910,7 @@ def main():
     parser.add_argument("--base_image_dir", type=str, default="",
                         help="Base directory containing RIVA dataset images (auto-discovered if empty)")
     parser.add_argument("--concept_ids", type=int, nargs="+",
-                        default=[139, 92, 75, 214, 89, 12],
+                        default=[139, 251, 61, 214, 12, 92],
                         help="Verified concept block IDs to visualize in Figure 9")
     parser.add_argument("--crop_size", type=int, default=256,
                         help="Pixel size of each cellular ROI crop (default: 256x256)")
@@ -1009,16 +1028,52 @@ def main():
             "n_crops": len(block_info["blended_crops"]),
         })
 
-        # Save Individual High-Res Panel per Block
+        # Save Individual High-Res Panel per Block (Fix 2 & 3: tight 2x7 layout, no vertical gap, clean suptitle)
         single_fig_path = save_dir / f"{args.sae_type}_block_C{g}_fig9_panel.png"
-        fig_single = plt.figure(figsize=(16, 6.5), dpi=args.dpi)
-        gs_single = gridspec.GridSpec(1, 1, figure=fig_single, left=0.04, right=0.96, top=0.92, bottom=0.06)
+        fig_single = plt.figure(figsize=(15.5, 5.2), dpi=args.dpi)
+        fig_single.subplots_adjust(top=0.86, bottom=0.04, left=0.02, right=0.98)
 
-        render_block_panel_to_subgridspec(fig_single, gs_single[0], block_info, crop_size=args.crop_size)
+        gs_single = gridspec.GridSpec(
+            2, 7, figure=fig_single,
+            width_ratios=[1, 1, 1, 1, 1, 0.15, 2.3],
+            height_ratios=[1, 1],
+            wspace=0.03, hspace=0.03
+        )
 
+        blended_crops = block_info["blended_crops"]
+        for idx in range(10):
+            row = idx // 5
+            col = idx % 5
+            ax = fig_single.add_subplot(gs_single[row, col])
+            if idx < len(blended_crops):
+                ax.imshow(blended_crops[idx])
+            else:
+                ax.imshow(np.ones((args.crop_size, args.crop_size, 3), dtype=np.float32) * 0.95)
+            ax.set_aspect('equal')
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_edgecolor('black')
+                spine.set_linewidth(1.0)
+                spine.set_visible(True)
+
+        ax3d = fig_single.add_subplot(gs_single[:, 6], projection='3d')
+        plot_3d_concept_manifold(
+            ax3d=ax3d,
+            u_g=block_info["u_g"],
+            colorize=block_info["colorize"],
+            d_arrow=block_info["d_arrow"],
+            erank=block_info["erank"],
+            block_g=block_info["block_g"],
+            sae_1d_name=block_info["sae_1d_name"],
+            j_star=block_info["j_star"],
+            is_combined=False
+        )
+
+        desc = CONCEPT_DESCRIPTIONS.get(g, "")
+        desc_str = f" - {desc}" if desc else ""
         fig_single.suptitle(
-            f"BSF Manifold Geometry & Cellular Grounding - Block C{g} "
-            f"({CONCEPT_DESCRIPTIONS.get(g, '')})",
+            f"BSF Manifold Geometry & Cellular Grounding - Block C{g}{desc_str}",
             fontsize=13, fontweight='bold', y=0.98
         )
         fig_single.savefig(str(single_fig_path), dpi=args.dpi, bbox_inches='tight')
@@ -1035,22 +1090,22 @@ def main():
         elif n_total <= 4:
             n_rows = 2
             n_cols = 2
-            figsize = (24, 11)
+            figsize = (22, 9.5)
         else:
             n_rows = 3
             n_cols = 2
-            figsize = (24, 16)
+            figsize = (22, 13.5)
 
         combined_fig_path = save_dir / f"{args.sae_type}_Figure9_6blocks_grid.png"
 
-        # Dimensions: scalable width and height for 300 DPI publication crispness
+        # Dimensions: 22x13.5 inches for 300 DPI publication crispness
         fig_comb = plt.figure(figsize=figsize, dpi=args.dpi)
 
         # Master GridSpec
         gs_master = gridspec.GridSpec(
             n_rows, n_cols, figure=fig_comb,
-            left=0.03, right=0.97, top=0.91, bottom=0.04,
-            wspace=0.10, hspace=0.22
+            left=0.02, right=0.98, top=0.91, bottom=0.03,
+            wspace=0.06, hspace=0.16
         )
 
         for idx in range(min(n_total, n_rows * n_cols)):
@@ -1061,7 +1116,8 @@ def main():
                 fig=fig_comb,
                 gs_parent=gs_master[r_idx, c_idx],
                 block_info=block_info,
-                crop_size=args.crop_size
+                crop_size=args.crop_size,
+                is_combined=True
             )
 
         # Publication Caption-Style Header
