@@ -5,7 +5,7 @@
   "concept_blocks": [
     {
       "block_id": 139,
-      "description": "Dysplasia Trajectory",
+      "description": "Dysplasia Progression Trajectory",
       "erank": 3.866344690322876,
       "matched_1d_sae": "OMPSAE",
       "matched_1d_atom": 179,
@@ -13,26 +13,26 @@
       "n_crops": 10
     },
     {
-      "block_id": 92,
-      "description": "PMN / Inflammatory Exudate",
-      "erank": 3.8178460597991943,
+      "block_id": 251,
+      "description": "High-Grade Squamous Lesion (HSIL/SCC, AUROC=0.82)",
+      "erank": 3.707407236099243,
       "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 92,
-      "projection_norm": 0.28546956181526184,
+      "matched_1d_atom": 784,
+      "projection_norm": 0.5841895341873169,
       "n_crops": 10
     },
     {
-      "block_id": 75,
-      "description": "Epithelial-Inflammatory Transition",
-      "erank": 3.806220531463623,
+      "block_id": 61,
+      "description": "Squamous Cell Carcinoma Sheets (SCC, 1.7x sel)",
+      "erank": 3.7451939582824707,
       "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 402,
-      "projection_norm": 0.44224414229393005,
+      "matched_1d_atom": 847,
+      "projection_norm": 0.34690454602241516,
       "n_crops": 10
     },
     {
       "block_id": 214,
-      "description": "Continuous Epithelial Manifold",
+      "description": "Continuous Epithelial Manifold (665x Cell/BG)",
       "erank": 3.7388336658477783,
       "matched_1d_sae": "OMPSAE",
       "matched_1d_atom": 376,
@@ -40,21 +40,21 @@
       "n_crops": 10
     },
     {
-      "block_id": 89,
-      "description": "Continuous Epithelial Manifold",
-      "erank": 3.9300522804260254,
-      "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 612,
-      "projection_norm": 0.2985699772834778,
-      "n_crops": 10
-    },
-    {
       "block_id": 12,
-      "description": "Endocervical Honeycomb Sheets",
+      "description": "Endocervical Honeycomb Sheets (2.6x sel)",
       "erank": 3.950472354888916,
       "matched_1d_sae": "OMPSAE",
       "matched_1d_atom": 796,
       "projection_norm": 0.5446083545684814,
+      "n_crops": 10
+    },
+    {
+      "block_id": 92,
+      "description": "PMN / Inflammatory Exudate Manifold",
+      "erank": 3.8178460597991943,
+      "matched_1d_sae": "OMPSAE",
+      "matched_1d_atom": 92,
+      "projection_norm": 0.28546956181526184,
       "n_crops": 10
     }
   ]
