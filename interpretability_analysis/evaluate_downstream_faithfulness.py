@@ -275,6 +275,256 @@ def match_and_score_detections(
     return n_matched, n_class_agreed, matched_base_scores, matched_interv_scores
 
 
+
+# ==============================================================================
+# FPN Level Ablation Sweep Pipeline
+# ==============================================================================
+
+def run_fpn_level_ablation_sweep(
+    sam3_model: nn.Module,
+    dataloader: DataLoader,
+    device: torch.device,
+    score_threshold: float = 0.3,
+    iou_threshold: float = 0.5
+) -> pd.DataFrame:
+    """
+    Runs an empirical ablation sweep across all FPN levels ('0', '1', '2', '3')
+    to determine which level drops Faster R-CNN detection F1 and class agreement most.
+
+    Step A: Unperturbed Baseline Pass + RoI Level Routing Counter.
+    Step B: 9 Ablation Conditions (Zero-Ablate-Level-*, Keep-Only-Level-*, Zero-Ablate-All).
+    """
+    sam3_model.eval()
+
+    # Step A: Unperturbed Baseline Pass + RoI Level Routing Counter
+    print("\n" + "="*70)
+    print("STEP A: Running Unperturbed Baseline Pass & Tracking RoI Level Routing...")
+    print("="*70)
+
+    roi_pooler = getattr(getattr(sam3_model, "roi_heads", None), "box_roi_pool", None)
+    roi_counts = {0: 0, 1: 0, 2: 0, 3: 0}
+    orig_map_levels = None
+    orig_forward = None
+
+    if roi_pooler is not None:
+        try:
+            import torchvision.ops.poolers as poolers
+            orig_forward = roi_pooler.forward
+            orig_map_levels = getattr(roi_pooler, "map_levels", None)
+
+            def hooked_pooler_forward(x, boxes, image_shapes):
+                x_filtered = poolers._filter_input(x, roi_pooler.featmap_names)
+                if roi_pooler.scales is None or roi_pooler.map_levels is None:
+                    roi_pooler.scales, roi_pooler.map_levels = poolers._setup_scales(
+                        x_filtered, image_shapes, roi_pooler.canonical_scale, roi_pooler.canonical_level
+                    )
+                nonlocal orig_map_levels
+                if not getattr(roi_pooler.map_levels, "_is_counting_wrapper", False):
+                    orig_map_levels = roi_pooler.map_levels
+                    def counting_map_levels(boxlists):
+                        lvls = orig_map_levels(boxlists)
+                        for lvl_idx in range(4):
+                            roi_counts[lvl_idx] += int((lvls == lvl_idx).sum().item())
+                        return lvls
+                    counting_map_levels._is_counting_wrapper = True
+                    roi_pooler.map_levels = counting_map_levels
+
+                return orig_forward(x, boxes, image_shapes)
+
+            roi_pooler.forward = hooked_pooler_forward
+        except Exception as e:
+            print(f"[WARNING] Could not wrap roi_pooler for routing statistics: {e}")
+
+    baseline_detections: List[Dict[str, torch.Tensor]] = []
+    total_baseline_boxes = 0
+
+    try:
+        with torch.no_grad():
+            for batch_imgs, _ in tqdm(dataloader, desc="Baseline Pass (RoI Routing Tracking)"):
+                batch_dev = batch_imgs.to(device)
+                images_list = [img for img in batch_dev]
+                outputs = sam3_model(images_list)
+
+                for out in outputs:
+                    boxes = out["boxes"].detach().cpu()
+                    labels = out["labels"].detach().cpu()
+                    scores = out["scores"].detach().cpu()
+
+                    high_conf_mask = scores > score_threshold
+                    b_boxes = boxes[high_conf_mask]
+                    b_labels = labels[high_conf_mask]
+                    b_scores = scores[high_conf_mask]
+
+                    baseline_detections.append({
+                        "boxes": b_boxes,
+                        "labels": b_labels,
+                        "scores": b_scores,
+                    })
+                    total_baseline_boxes += len(b_boxes)
+    finally:
+        if roi_pooler is not None:
+            if orig_forward is not None:
+                roi_pooler.forward = orig_forward
+            if orig_map_levels is not None:
+                roi_pooler.map_levels = orig_map_levels
+
+    total_rois = sum(roi_counts.values())
+    roi_pcts = {
+        lvl: (roi_counts[lvl] / max(1, total_rois)) * 100.0
+        for lvl in range(4)
+    }
+
+    print("\n--- RoI Level Routing Statistics (Baseline Pass) ---")
+    print(f"Total RoI proposals pooled across images: {total_rois:,}")
+    for lvl_idx, name in enumerate(["0", "1", "2", "3"]):
+        cnt = roi_counts[lvl_idx]
+        pct = roi_pcts[lvl_idx]
+        print(f"  FPN Level '{name}': {cnt:,} RoIs ({pct:.2f}%)")
+    print(f"Total baseline high-confidence detections (score > {score_threshold}): {total_baseline_boxes:,}")
+    print("-" * 52)
+
+    # Step B: Ablation Conditions
+    print("\n" + "="*70)
+    print("STEP B: Evaluating 9 FPN Level Ablation Conditions...")
+    print("="*70)
+
+    conditions = [
+        "Zero-Ablate-Level-0",
+        "Zero-Ablate-Level-1",
+        "Zero-Ablate-Level-2",
+        "Zero-Ablate-Level-3",
+        "Keep-Only-Level-0",
+        "Keep-Only-Level-1",
+        "Keep-Only-Level-2",
+        "Keep-Only-Level-3",
+        "Zero-Ablate-All",
+    ]
+
+    records = []
+
+    for cond in conditions:
+        def make_ablation_hook(c_name):
+            def hook_fn(module, input, output):
+                new_out = OrderedDict(output)
+                if c_name == "Zero-Ablate-Level-0":
+                    if "0" in new_out: new_out["0"] = torch.zeros_like(new_out["0"])
+                elif c_name == "Zero-Ablate-Level-1":
+                    if "1" in new_out: new_out["1"] = torch.zeros_like(new_out["1"])
+                elif c_name == "Zero-Ablate-Level-2":
+                    if "2" in new_out: new_out["2"] = torch.zeros_like(new_out["2"])
+                elif c_name == "Zero-Ablate-Level-3":
+                    if "3" in new_out: new_out["3"] = torch.zeros_like(new_out["3"])
+                elif c_name == "Keep-Only-Level-0":
+                    for k in ["1", "2", "3"]:
+                        if k in new_out: new_out[k] = torch.zeros_like(new_out[k])
+                elif c_name == "Keep-Only-Level-1":
+                    for k in ["0", "2", "3"]:
+                        if k in new_out: new_out[k] = torch.zeros_like(new_out[k])
+                elif c_name == "Keep-Only-Level-2":
+                    for k in ["0", "1", "3"]:
+                        if k in new_out: new_out[k] = torch.zeros_like(new_out[k])
+                elif c_name == "Keep-Only-Level-3":
+                    for k in ["0", "1", "2"]:
+                        if k in new_out: new_out[k] = torch.zeros_like(new_out[k])
+                elif c_name == "Zero-Ablate-All":
+                    for k in list(new_out.keys()):
+                        new_out[k] = torch.zeros_like(new_out[k])
+                return new_out
+            return hook_fn
+
+        hook_handle = sam3_model.backbone.register_forward_hook(make_ablation_hook(cond))
+
+        total_matched = 0
+        total_class_agreed = 0
+        total_interv_boxes = 0
+        all_matched_base_scores = []
+        all_matched_interv_scores = []
+
+        try:
+            img_idx = 0
+            with torch.no_grad():
+                for batch_imgs, _ in tqdm(dataloader, desc=f"Ablation Pass [{cond}]"):
+                    batch_dev = batch_imgs.to(device)
+                    images_list = [img for img in batch_dev]
+                    outputs = sam3_model(images_list)
+
+                    for out in outputs:
+                        b_det = baseline_detections[img_idx]
+                        img_idx += 1
+
+                        boxes = out["boxes"].detach().cpu()
+                        labels = out["labels"].detach().cpu()
+                        scores = out["scores"].detach().cpu()
+
+                        high_conf_mask = scores > score_threshold
+                        i_boxes = boxes[high_conf_mask]
+                        i_labels = labels[high_conf_mask]
+                        i_scores = scores[high_conf_mask]
+
+                        total_interv_boxes += len(i_boxes)
+
+                        n_m, n_ca, s_base, s_int = match_and_score_detections(
+                            b_det["boxes"], b_det["labels"], b_det["scores"],
+                            i_boxes, i_labels, i_scores,
+                            iou_threshold=iou_threshold
+                        )
+
+                        total_matched += n_m
+                        total_class_agreed += n_ca
+                        all_matched_base_scores.extend(s_base)
+                        all_matched_interv_scores.extend(s_int)
+        finally:
+            hook_handle.remove()
+
+        recall = float(total_matched / max(1, total_baseline_boxes))
+        precision = float(total_matched / max(1, total_interv_boxes))
+        if (precision + recall) > 0:
+            f1 = float(2.0 * precision * recall / (precision + recall))
+        else:
+            f1 = 0.0
+
+        f1_retention = f1 * 100.0
+        f1_drop = 100.0 - f1_retention
+        class_agreement = float(total_class_agreed / max(1, total_matched)) * 100.0 if total_matched > 0 else 0.0
+
+        if len(all_matched_base_scores) >= 3:
+            score_corr = safe_pearson_corr(
+                np.array(all_matched_base_scores),
+                np.array(all_matched_interv_scores)
+            )
+        else:
+            score_corr = 0.0
+
+        if "Level-0" in cond:
+            routing_pct = roi_pcts[0]
+        elif "Level-1" in cond:
+            routing_pct = roi_pcts[1]
+        elif "Level-2" in cond:
+            routing_pct = roi_pcts[2]
+        elif "Level-3" in cond:
+            routing_pct = roi_pcts[3]
+        else:
+            routing_pct = np.nan
+
+        print(f"[{cond}] -> F1 Retention: {f1_retention:.2f}% (Drop: {f1_drop:.2f}%) | Cls Agreement: {class_agreement:.2f}% | Score r: {score_corr:.4f}")
+
+        records.append({
+            "condition": cond,
+            "f1_box_retention": round(f1_retention, 2),
+            "f1_drop": round(f1_drop, 2),
+            "box_recall": round(recall * 100.0, 2),
+            "box_precision": round(precision * 100.0, 2),
+            "class_agreement_pct": round(class_agreement, 2),
+            "mean_score_correlation": round(float(score_corr), 4),
+            "baseline_boxes_count": total_baseline_boxes,
+            "intervention_boxes_count": total_interv_boxes,
+            "matched_boxes_count": total_matched,
+            "roi_routing_pct_on_target_level": round(routing_pct, 2) if not np.isnan(routing_pct) else np.nan,
+        })
+
+    df_sweep = pd.DataFrame(records)
+    return df_sweep
+
 # ==============================================================================
 # Core Faithfulness Evaluation Pipeline
 # ==============================================================================
@@ -286,7 +536,8 @@ def evaluate_downstream_faithfulness(
     device: torch.device,
     score_threshold: float = 0.3,
     iou_threshold: float = 0.5,
-    ablate_other_fpn_levels: bool = False
+    ablate_other_fpn_levels: bool = False,
+    fpn_level: str = "1"
 ) -> pd.DataFrame:
     """
     Executes the baseline pass and interventions for all SAE models + Zero-Ablation.
@@ -303,13 +554,13 @@ def evaluate_downstream_faithfulness(
     print("="*70)
 
     if ablate_other_fpn_levels:
-        def base_level1_hook(module, input, output):
+        def base_level_hook(module, input, output):
             new_out = OrderedDict(output)
             for k in list(new_out.keys()):
-                if k != "1":
+                if k != fpn_level:
                     new_out[k] = torch.zeros_like(new_out[k])
             return new_out
-        base_hook_handle = sam3_model.backbone.register_forward_hook(base_level1_hook)
+        base_hook_handle = sam3_model.backbone.register_forward_hook(base_level_hook)
     else:
         base_hook_handle = None
 
@@ -361,7 +612,7 @@ def evaluate_downstream_faithfulness(
         def make_hook(name, sae_m):
             def hook_fn(module, input, output):
                 # output is an OrderedDict[str, Tensor] with keys "0", "1", "2", "3"
-                feat = output["1"]  # [B, C, H, W]
+                feat = output[fpn_level]  # [B, C, H, W]
                 B, C, H, W = feat.shape
                 feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
 
@@ -385,9 +636,9 @@ def evaluate_downstream_faithfulness(
                 new_out = OrderedDict(output)
                 if ablate_other_fpn_levels:
                     for k in list(new_out.keys()):
-                        if k != "1":
+                        if k != fpn_level:
                             new_out[k] = torch.zeros_like(new_out[k])
-                new_out["1"] = x_hat
+                new_out[fpn_level] = x_hat
                 return new_out
             return hook_fn
 
@@ -458,7 +709,7 @@ def evaluate_downstream_faithfulness(
         print(f"  F1 Box Retention:     {f1 * 100.0:.2f}% (Recall: {recall * 100.0:.2f}%, Prec: {precision * 100.0:.2f}%)")
         print(f"  Class Agreement:      {class_agreement:.2f}% ({total_class_agreed}/{total_matched} matched boxes)")
         print(f"  Score Correlation:    r = {score_corr:.4f}")
-        print(f"  FPN Level 1 R^2:      {r2_fpn:.4f}")
+        print(f"  FPN Level '{fpn_level}' R^2:      {r2_fpn:.4f}")
 
         results.append({
             "model": model_name,
@@ -622,6 +873,31 @@ def main(args):
     # 2. Load SAM3 Faster R-CNN
     sam3_model = load_sam3_detector(args.weight_checkpoint, device)
 
+    # FPN Level Ablation Sweep Mode
+    if getattr(args, "fpn_ablation_sweep", False):
+        print("\n" + "="*80)
+        print("FPN LEVEL ABLATION SWEEP MODE ENABLED")
+        print("Measuring empirical Faster R-CNN downstream impact across all FPN levels ('0', '1', '2', '3')")
+        print("="*80)
+        df_sweep = run_fpn_level_ablation_sweep(
+            sam3_model=sam3_model,
+            dataloader=eval_loader,
+            device=device,
+            score_threshold=args.score_threshold,
+            iou_threshold=args.iou_threshold
+        )
+        sweep_csv_path = Path(args.save_sweep_csv)
+        sweep_csv_path.parent.mkdir(parents=True, exist_ok=True)
+        df_sweep.to_csv(str(sweep_csv_path), index=False)
+        print(f"\n[INFO] Saved FPN level ablation sweep results to {sweep_csv_path}")
+
+        print("\n" + "="*80)
+        print("SUMMARY TABLE: FPN Level Ablation Sweep")
+        print("="*80)
+        print(df_sweep.to_string(index=False))
+        print("="*80)
+        return
+
     # 3. Instantiate Models
     eval_models: Dict[str, Optional[nn.Module]] = {}
 
@@ -648,7 +924,8 @@ def main(args):
         device=device,
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
-        ablate_other_fpn_levels=getattr(args, "ablate_other_fpn_levels", False)
+        ablate_other_fpn_levels=getattr(args, "ablate_other_fpn_levels", False),
+        fpn_level=getattr(args, "fpn_level", "1")
     )
 
     # 5. Save Table & Plot
@@ -681,6 +958,18 @@ if __name__ == "__main__":
     parser.add_argument(
         "--ablate_other_fpn_levels", action="store_true", default=False,
         help="Ablate (zero-out) other FPN levels ('0', '2', '3') to test isolated level '1' downstream impact."
+    )
+    parser.add_argument(
+        "--fpn_level", type=str, default="1", choices=["0", "1", "2", "3"],
+        help="Target FPN level for SAE intervention (default: '1')."
+    )
+    parser.add_argument(
+        "--fpn_ablation_sweep", action="store_true", default=False,
+        help="Run an empirical ablation sweep across all FPN levels ('0', '1', '2', '3') without loading SAEs, and save results to ./interpretability_analysis/results/fpn_level_ablation_sweep.csv."
+    )
+    parser.add_argument(
+        "--save_sweep_csv", type=str, default="./interpretability_analysis/results/fpn_level_ablation_sweep.csv",
+        help="Path to save the FPN level ablation sweep CSV."
     )
     parser.add_argument(
         "--checkpoint_dir", type=str, default="./interpretability_analysis/checkpoints",
