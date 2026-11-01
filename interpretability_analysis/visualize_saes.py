@@ -124,7 +124,8 @@ def main(args):
     
     test_dataset = ImagePathDataset(test_paths)
     # Using a small batch size to fit in memory (images are 1008x1008)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    num_workers = 0 if os.name == "nt" else 4
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
     # Determine input_dim (assume same as train_saes.py logic for FPN)
     # The SAM3 FPN output typically has 256 channels
@@ -149,6 +150,7 @@ def main(args):
             else:
                 print("Warning: Anchor points and train_features not found, falling back to random points")
                 loaded_points = torch.randn(1024, input_dim, device=device)
+        loaded_points = torch.nn.functional.normalize(loaded_points.float(), p=2, dim=-1)
 
     # 3. Initialize and Load SAE
     sae_classes = {
@@ -198,7 +200,31 @@ def main(args):
         target_concept_ids.extend(args.concept_id)
 
     if not target_concept_ids:
-        target_concept_ids = [5]
+        ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{args.sae_type}.csv"
+        enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{args.sae_type}.csv"
+        if os.path.exists(ranking_csv):
+            import pandas as pd
+            df_rank = pd.read_csv(ranking_csv)
+            if "concept_id" in df_rank.columns:
+                target_concept_ids = df_rank["concept_id"].head(5).tolist()
+                print(f"[INFO] Auto-selected top 5 concept IDs from {ranking_csv}: {target_concept_ids}")
+        elif os.path.exists(enrichment_csv):
+            import pandas as pd
+            df_enrich = pd.read_csv(enrichment_csv)
+            if "mean_act_all_cells" in df_enrich.columns and "mean_act_bg_exudate" in df_enrich.columns:
+                active_mask = (df_enrich["mean_act_all_cells"] + df_enrich["mean_act_bg_exudate"]) > 1e-4
+                df_active = df_enrich[active_mask]
+            else:
+                df_active = df_enrich
+            if "max_selectivity" in df_active.columns:
+                df_sorted = df_active.sort_values(by="max_selectivity", ascending=False)
+                target_concept_ids = df_sorted["concept_id"].head(5).tolist()
+            elif "concept_id" in df_active.columns:
+                target_concept_ids = df_active["concept_id"].head(5).tolist()
+            print(f"[INFO] Auto-selected top 5 concept IDs from {enrichment_csv}: {target_concept_ids}")
+
+        if not target_concept_ids:
+            target_concept_ids = [5]
 
     # Deduplicate while preserving order
     seen = set()

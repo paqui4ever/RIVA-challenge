@@ -298,10 +298,11 @@ def plot_block_concepts_manifold(
             norm_p = np.linalg.norm(c_p, axis=1)
             alpha_p = (norm_p / max(norm_p.max(), 1e-8)).clip(0, 1)
             rgba_p = np.concatenate([rgb_p, alpha_p[:, None]], 1).reshape(grid_size, grid_size, 4)
+            rgba_p = np.clip(rgba_p, 0.0, 1.0)
 
             h, w = img.shape[:2]
             ax.imshow(img)
-            ax.imshow(rgba_p, extent=(0, w, h, 0), interpolation='bicubic')
+            ax.imshow(rgba_p, extent=(0, w, h, 0), interpolation='bilinear')
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_title(f"Rank {j+1}")

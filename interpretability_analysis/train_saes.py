@@ -367,7 +367,8 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
 
     # Write training history to CSV
     if results_dir:
-        history_csv = os.path.join(results_dir, "sae_training_history.csv")
+        hist_fname = "sae_training_history_quicktest.csv" if getattr(args, "quick_test", False) else "sae_training_history.csv"
+        history_csv = os.path.join(results_dir, hist_fname)
         save_records_to_csv(history_csv, history_records)
 
         # Write summary row for this model to CSV
@@ -395,14 +396,41 @@ def train_sae(model, name, train_tensor, val_tensor, args, device, logger, resul
                 "final_hoyer_val": last_rec["hoyer_val"],
                 "final_collinearity_val": last_rec["dictionary_collinearity_val"],
             }]
-            summary_csv = os.path.join(results_dir, "sae_summary.csv")
+            summ_fname = "sae_summary_quicktest.csv" if getattr(args, "quick_test", False) else "sae_summary.csv"
+            summary_csv = os.path.join(results_dir, summ_fname)
             save_records_to_csv(summary_csv, summary_record)
 
     return model
 
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    try:
+        import numpy as np
+        np.random.seed(seed)
+    except ImportError:
+        pass
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
 def main(args):
+    set_seed(42)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Results directory setup and overwrite logic
+    if args.results_dir:
+        os.makedirs(args.results_dir, exist_ok=True)
+        if not args.quick_test and (args.overwrite_results or "all" in args.models):
+            for fname in ["sae_summary.csv", "sae_training_history.csv", "sae_dictionary_comparisons.csv"]:
+                p = os.path.join(args.results_dir, fname)
+                if os.path.exists(p):
+                    try:
+                        os.remove(p)
+                        print(f"[CLEANUP] Removed existing results file: {p}")
+                    except Exception as e:
+                        print(f"Warning: Could not remove {p}: {e}")
 
     if args.logger == "wandb":
         import wandb
@@ -489,13 +517,18 @@ def main(args):
     points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
     if os.path.exists(points_path):
         init_points = torch.load(points_path, map_location=device, weights_only=False)
+        mean_norm = init_points.norm(dim=-1).mean().item()
+        if abs(mean_norm - 1.0) > 0.05:
+            print(f"[INFO] Loaded ratopk_points.pt mean norm is {mean_norm:.4f} (!= 1.0). Normalizing and re-saving...")
+            init_points = torch.nn.functional.normalize(init_points.float(), p=2, dim=-1)
+            torch.save(init_points.cpu(), points_path)
     else:
         # Filter out low-energy background/padding tokens (top 70% by L2 norm)
         norms = train_features.norm(dim=-1)
         valid_idx = torch.where(norms > torch.quantile(norms[:100000], 0.30))[0]
         g = torch.Generator().manual_seed(42)
         perm = valid_idx[torch.randperm(len(valid_idx), generator=g)[:1024]]
-        init_points = train_features[perm].clone()
+        init_points = torch.nn.functional.normalize(train_features[perm].clone().float(), p=2, dim=-1)
         torch.save(init_points.cpu(), points_path)
 
     available_models = [
@@ -554,6 +587,7 @@ def main(args):
         print(f"\nTarget models to train: {target_models}")
         for name in target_models:
             print(f"\nInstantiating {name}...")
+            set_seed(42)
             sae = build_model(name)
             trained = train_sae(sae, name, train_features, val_features, args, device, logger, results_dir=args.results_dir)
             trained_models[name] = trained
@@ -586,6 +620,7 @@ def main(args):
             if os.path.exists(ckpt_path):
                 print(f"Loading existing checkpoint for comparison: {name} ({ckpt_path})")
                 try:
+                    set_seed(42)
                     m = build_model(name)
                     m.load_state_dict(torch.load(ckpt_path, map_location="cpu", weights_only=False))
                     d = _get_dict(m)
@@ -609,38 +644,58 @@ def main(args):
                 # Check dimensions before Hungarian loss
                 if d1.shape == d2.shape:
                     try:
-                        h_loss = hungarian_loss(d1.to(device), d2.to(device))
-                        ch_loss = cosine_hungarian_loss(d1.to(device), d2.to(device))
+                        d1_norm = torch.nn.functional.normalize(d1.float().to(device), p=2, dim=-1)
+                        d2_norm = torch.nn.functional.normalize(d2.float().to(device), p=2, dim=-1)
+                        num_atoms = float(d1_norm.shape[0])
+
+                        # overcomplete hungarian_loss and cosine_hungarian_loss return sum over matched rows
+                        h_loss_raw = hungarian_loss(d1_norm, d2_norm)
+                        ch_loss_raw = cosine_hungarian_loss(d1_norm, d2_norm)
+                        h_loss = float(h_loss_raw) / num_atoms
+                        ch_loss = float(ch_loss_raw) / num_atoms
+
+                        # Compute matched cosine similarity and mean max absolute cosine similarity
+                        matched_cos_sim = 1.0 - ch_loss
+                        cos_matrix = torch.matmul(d1_norm, d2_norm.T)
+                        mean_max_cos_sim = float(cos_matrix.abs().max(dim=1).values.mean().item())
+
                         print(f"Comparison {n1} vs {n2}:")
-                        print(f"  Hungarian Loss: {h_loss:.4f}")
-                        print(f"  Cosine Hungarian Loss: {ch_loss:.4f}")
-                        
+                        print(f"  Mean Euclidean Hungarian Loss: {h_loss:.4f}")
+                        print(f"  Mean Cosine Hungarian Loss:    {ch_loss:.4f}")
+                        print(f"  Matched Cosine Similarity:     {matched_cos_sim:.4f}")
+                        print(f"  Mean Max Cosine Similarity:    {mean_max_cos_sim:.4f}")
+
                         comparison_records.append({
                             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                             "model_1": n1,
                             "model_2": n2,
                             "hungarian_loss": round(float(h_loss), 6),
                             "cosine_hungarian_loss": round(float(ch_loss), 6),
+                            "matched_cosine_similarity": round(float(matched_cos_sim), 6),
+                            "mean_max_cosine_sim": round(float(mean_max_cos_sim), 6),
                         })
 
                         if logger:
                             comp_name = f"{n1}_vs_{n2}"
                             metrics = {
                                 f"Comparison/{comp_name}_hungarian_loss": h_loss,
-                                f"Comparison/{comp_name}_cosine_hungarian_loss": ch_loss
+                                f"Comparison/{comp_name}_cosine_hungarian_loss": ch_loss,
+                                f"Comparison/{comp_name}_matched_cosine_similarity": matched_cos_sim,
+                                f"Comparison/{comp_name}_mean_max_cosine_sim": mean_max_cos_sim,
                             }
                             if args.logger == "wandb":
                                 logger.log(metrics)
                             elif args.logger == "tensorboard":
-                                logger.add_scalar(f"Comparison/{comp_name}_hungarian_loss", h_loss, 0)
-                                logger.add_scalar(f"Comparison/{comp_name}_cosine_hungarian_loss", ch_loss, 0)
+                                for mk, mv in metrics.items():
+                                    logger.add_scalar(mk, mv, 0)
                     except Exception as e:
                         print(f"Comparison {n1} vs {n2} skipped due to error: {e}")
                 else:
                     print(f"Comparison {n1} ({d1.shape}) vs {n2} ({d2.shape}): Shapes differ, skipping Hungarian loss.")
 
     if comparison_records and args.results_dir:
-        comp_csv = os.path.join(args.results_dir, "sae_dictionary_comparisons.csv")
+        comp_fname = "sae_dictionary_comparisons_quicktest.csv" if getattr(args, "quick_test", False) else "sae_dictionary_comparisons.csv"
+        comp_csv = os.path.join(args.results_dir, comp_fname)
         save_records_to_csv(comp_csv, comparison_records)
 
     if args.logger == "wandb":
@@ -653,6 +708,8 @@ if __name__ == "__main__":
                         help="List of SAE/BSF models to train. (default: all)")
     parser.add_argument("--quick_test", action="store_true",
                         help="Fast test mode: trains for 2 epochs on 1000 samples to verify pipeline.")
+    parser.add_argument("--overwrite_results", action="store_true", default=False,
+                        help="Overwrite existing results CSV files instead of appending.")
     parser.add_argument("--compare_only", action="store_true",
                         help="Skip training and run dictionary comparison on existing checkpoints.")
     parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate")

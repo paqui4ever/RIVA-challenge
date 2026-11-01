@@ -173,6 +173,7 @@ def build_and_load_sae_model(
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
         else:
             loaded_points = torch.randn(1024, input_dim, device=device)
+        loaded_points = torch.nn.functional.normalize(loaded_points.float(), p=2, dim=-1)
 
     sae_constructors = {
         "TopKSAE": lambda: TopKSAE(input_dim, hidden_dim, top_k=k),
@@ -284,7 +285,8 @@ def evaluate_downstream_faithfulness(
     sae_models: Dict[str, Optional[nn.Module]],
     device: torch.device,
     score_threshold: float = 0.3,
-    iou_threshold: float = 0.5
+    iou_threshold: float = 0.5,
+    ablate_other_fpn_levels: bool = False
 ) -> pd.DataFrame:
     """
     Executes the baseline pass and interventions for all SAE models + Zero-Ablation.
@@ -296,34 +298,50 @@ def evaluate_downstream_faithfulness(
     # 1. Baseline Detection Pass
     print("\n" + "="*70)
     print("STEP 1: Running Unperturbed Faster R-CNN Baseline Pass...")
+    if ablate_other_fpn_levels:
+        print("[ISOLATION MODE] Ablating non-Level-1 FPN levels ('0', '2', '3') in baseline and interventions.")
     print("="*70)
+
+    if ablate_other_fpn_levels:
+        def base_level1_hook(module, input, output):
+            new_out = OrderedDict(output)
+            for k in list(new_out.keys()):
+                if k != "1":
+                    new_out[k] = torch.zeros_like(new_out[k])
+            return new_out
+        base_hook_handle = sam3_model.backbone.register_forward_hook(base_level1_hook)
+    else:
+        base_hook_handle = None
 
     baseline_detections: List[Dict[str, torch.Tensor]] = []
     total_baseline_boxes = 0
 
-    with torch.no_grad():
-        for batch_imgs, _ in tqdm(dataloader, desc="Baseline Faster R-CNN Pass"):
-            batch_dev = batch_imgs.to(device)
-            # Faster R-CNN expects list of image tensors
-            images_list = [img for img in batch_dev]
-            outputs = sam3_model(images_list)
+    try:
+        with torch.no_grad():
+            for batch_imgs, _ in tqdm(dataloader, desc="Baseline Faster R-CNN Pass"):
+                batch_dev = batch_imgs.to(device)
+                images_list = [img for img in batch_dev]
+                outputs = sam3_model(images_list)
 
-            for out in outputs:
-                boxes = out["boxes"].detach().cpu()
-                labels = out["labels"].detach().cpu()
-                scores = out["scores"].detach().cpu()
+                for out in outputs:
+                    boxes = out["boxes"].detach().cpu()
+                    labels = out["labels"].detach().cpu()
+                    scores = out["scores"].detach().cpu()
 
-                high_conf_mask = scores > score_threshold
-                b_boxes = boxes[high_conf_mask]
-                b_labels = labels[high_conf_mask]
-                b_scores = scores[high_conf_mask]
+                    high_conf_mask = scores > score_threshold
+                    b_boxes = boxes[high_conf_mask]
+                    b_labels = labels[high_conf_mask]
+                    b_scores = scores[high_conf_mask]
 
-                baseline_detections.append({
-                    "boxes": b_boxes,
-                    "labels": b_labels,
-                    "scores": b_scores,
-                })
-                total_baseline_boxes += len(b_boxes)
+                    baseline_detections.append({
+                        "boxes": b_boxes,
+                        "labels": b_labels,
+                        "scores": b_scores,
+                    })
+                    total_baseline_boxes += len(b_boxes)
+    finally:
+        if base_hook_handle is not None:
+            base_hook_handle.remove()
 
     print(f"[INFO] Baseline pass recorded {total_baseline_boxes} high-confidence boxes (score > {score_threshold})")
 
@@ -365,6 +383,10 @@ def evaluate_downstream_faithfulness(
 
                 # Replace in-place and return modified OrderedDict
                 new_out = OrderedDict(output)
+                if ablate_other_fpn_levels:
+                    for k in list(new_out.keys()):
+                        if k != "1":
+                            new_out[k] = torch.zeros_like(new_out[k])
                 new_out["1"] = x_hat
                 return new_out
             return hook_fn
@@ -514,12 +536,18 @@ def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str):
     ax.set_ylabel("Confidence Score Correlation (r)", fontsize=11, fontweight="bold")
     ax.set_title("Detection Confidence Score Faithfulness", fontsize=12, fontweight="bold")
     ax.grid(True, linestyle="--", alpha=0.35, axis="y")
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="-")
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels(models, rotation=30, ha="right", fontsize=9, fontweight="medium")
+    min_sc = min(0.0, float(df_results["mean_score_correlation"].min()))
+    max_sc = max(1.0, float(df_results["mean_score_correlation"].max()))
+    ax.set_ylim(min_sc - (0.15 * abs(min_sc) if abs(min_sc) > 0 else 0.08), max_sc + 0.15 * max_sc)
     for bar in bars:
         h = bar.get_height()
-        ax.annotate(f"r={h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, max(0, h)),
-                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=8, fontweight="bold")
+        y_text = h + (0.03 if h >= 0 else -0.05)
+        va_mode = "bottom" if h >= 0 else "top"
+        ax.annotate(f"r={h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, y_text),
+                    ha="center", va=va_mode, fontsize=8, fontweight="bold")
 
     # Metric 4: FPN Reconstruction R^2
     ax = axes[3]
@@ -527,12 +555,21 @@ def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str):
     ax.set_ylabel("Feature Reconstruction R²", fontsize=11, fontweight="bold")
     ax.set_title("FPN Layer '1' Sparse Feature Reconstruction Quality", fontsize=12, fontweight="bold")
     ax.grid(True, linestyle="--", alpha=0.35, axis="y")
+    ax.axhline(0, color="black", linewidth=0.8, linestyle="-")
     ax.set_xticks(range(len(models)))
     ax.set_xticklabels(models, rotation=30, ha="right", fontsize=9, fontweight="medium")
+    r2_vals = df_results["r2_fpn"].values
+    min_r2 = min(0.0, float(np.nanmin(r2_vals)))
+    max_r2 = max(1.0, float(np.nanmax(r2_vals)))
+    y_lower = min_r2 - (0.18 * abs(min_r2) if abs(min_r2) > 0 else 0.1)
+    y_upper = max_r2 + 0.15 * max_r2
+    ax.set_ylim(y_lower, y_upper)
     for bar in bars:
         h = bar.get_height()
-        ax.annotate(f"{h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, max(0, h)),
-                    xytext=(0, 3), textcoords="offset points", ha="center", va="bottom", fontsize=8, fontweight="bold")
+        y_text = h + (0.03 if h >= 0 else -0.05)
+        va_mode = "bottom" if h >= 0 else "top"
+        ax.annotate(f"{h:.3f}", xy=(bar.get_x() + bar.get_width() / 2, y_text),
+                    ha="center", va=va_mode, fontsize=8, fontweight="bold")
 
     plt.suptitle(
         "Downstream Faster R-CNN Intervention Faithfulness Evaluation\n"
@@ -579,7 +616,8 @@ def main(args):
 
     print(f"[INFO] Evaluating on {len(eval_paths)} images from '{args.split}' split.")
     eval_dataset = TestImagesDataset(eval_paths, target_size=1008)
-    eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    num_workers = 0 if os.name == "nt" else 2
+    eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
     # 2. Load SAM3 Faster R-CNN
     sam3_model = load_sam3_detector(args.weight_checkpoint, device)
@@ -609,7 +647,8 @@ def main(args):
         sae_models=eval_models,
         device=device,
         score_threshold=args.score_threshold,
-        iou_threshold=args.iou_threshold
+        iou_threshold=args.iou_threshold,
+        ablate_other_fpn_levels=getattr(args, "ablate_other_fpn_levels", False)
     )
 
     # 5. Save Table & Plot
@@ -638,6 +677,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--include_zero_ablation", action="store_true", default=True,
         help="Include zero-ablation baseline (setting FPN layer '1' to zeros)."
+    )
+    parser.add_argument(
+        "--ablate_other_fpn_levels", action="store_true", default=False,
+        help="Ablate (zero-out) other FPN levels ('0', '2', '3') to test isolated level '1' downstream impact."
     )
     parser.add_argument(
         "--checkpoint_dir", type=str, default="./interpretability_analysis/checkpoints",

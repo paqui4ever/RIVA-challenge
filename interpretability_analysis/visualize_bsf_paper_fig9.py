@@ -890,6 +890,134 @@ def process_block(
 # 8. Main CLI & Figure Rendering Orchestration
 # ==============================================================================
 
+
+def get_dynamic_concepts_and_descriptions(sae_type: str, requested_concept_ids: Optional[List[int]] = None) -> Tuple[List[int], Dict[int, str]]:
+    """
+    Selects 6 diverse, high-selectivity concept blocks and builds biological descriptions
+    from bethesda_class_enrichment_{sae_type}.csv if available, falling back cleanly.
+    """
+    enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{sae_type}.csv"
+    ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{sae_type}.csv"
+
+    descriptions: Dict[int, str] = {}
+    df_enrich = None
+    if os.path.exists(enrichment_csv):
+        import pandas as pd
+        df_enrich = pd.read_csv(enrichment_csv)
+        for _, row in df_enrich.iterrows():
+            cid = int(row["concept_id"])
+            top_cls = str(row.get("top_bethesda_class", "Cell"))
+            max_sel = float(row.get("max_selectivity", 1.0))
+            cbg = float(row.get("cell_vs_bg_ratio", 1.0))
+            descriptions[cid] = f"{top_cls}-Selective Manifold ({max_sel:.1f}x sel, Cell/BG={cbg:.1f}x)"
+
+    if requested_concept_ids is not None and len(requested_concept_ids) > 0:
+        final_ids = requested_concept_ids
+    else:
+        chosen_ids = []
+        if df_enrich is not None:
+            if "mean_act_all_cells" in df_enrich.columns and "mean_act_bg_exudate" in df_enrich.columns:
+                active_mask = (df_enrich["mean_act_all_cells"] + df_enrich["mean_act_bg_exudate"]) > 1e-4
+                df_act = df_enrich[active_mask].copy()
+            else:
+                df_act = df_enrich.copy()
+
+            def pick_top(df_sub, sort_col, ascending=False, extra_filter=None):
+                sub = df_sub
+                if extra_filter is not None:
+                    try:
+                        filt = extra_filter(sub)
+                        if filt is not None and filt.sum() > 0:
+                            sub = sub[filt]
+                    except Exception:
+                        pass
+                if len(sub) == 0:
+                    return None
+                for _, r in sub.sort_values(by=sort_col, ascending=ascending).iterrows():
+                    cid = int(r["concept_id"])
+                    if cid not in chosen_ids:
+                        return cid
+                return None
+
+            # 1. Top block by cell_vs_bg_ratio * (1 + abs(mean_act_HIGH_GRADE - mean_act_NORMAL)) (Dysplasia Progression)
+            if "cell_vs_bg_ratio" in df_act.columns and "mean_act_HIGH_GRADE" in df_act.columns and "mean_act_NORMAL" in df_act.columns:
+                df_act["dysplasia_score"] = df_act["cell_vs_bg_ratio"] * (1.0 + (df_act["mean_act_HIGH_GRADE"] - df_act["mean_act_NORMAL"]).abs())
+                c1 = pick_top(df_act, "dysplasia_score", ascending=False)
+                if c1 is not None:
+                    chosen_ids.append(c1)
+                    descriptions[c1] = "Dysplasia Progression Trajectory"
+
+            # 2. Top block by auroc_HIGH_GRADE (with cell_vs_bg_ratio > 2.0)
+            if "auroc_HIGH_GRADE" in df_act.columns:
+                c2 = pick_top(df_act, "auroc_HIGH_GRADE", ascending=False,
+                              extra_filter=lambda df: df["cell_vs_bg_ratio"] > 2.0 if "cell_vs_bg_ratio" in df.columns else None)
+                if c2 is not None:
+                    chosen_ids.append(c2)
+
+            # 3. Top block by selectivity_SCC or selectivity_HSIL (with cell_vs_bg_ratio > 2.0)
+            sort_3 = "selectivity_SCC" if "selectivity_SCC" in df_act.columns else ("selectivity_HSIL" if "selectivity_HSIL" in df_act.columns else None)
+            if sort_3:
+                c3 = pick_top(df_act, sort_3, ascending=False,
+                              extra_filter=lambda df: df["cell_vs_bg_ratio"] > 2.0 if "cell_vs_bg_ratio" in df.columns else None)
+                if c3 is not None:
+                    chosen_ids.append(c3)
+
+            # 4. Top block by cell_vs_bg_ratio
+            if "cell_vs_bg_ratio" in df_act.columns:
+                c4 = pick_top(df_act, "cell_vs_bg_ratio", ascending=False)
+                if c4 is not None:
+                    chosen_ids.append(c4)
+
+            # 5. Top block by selectivity_ENDOCERVICAL or selectivity_LSIL (with cell_vs_bg_ratio > 2.0)
+            sort_5 = "selectivity_ENDOCERVICAL" if "selectivity_ENDOCERVICAL" in df_act.columns else ("selectivity_LSIL" if "selectivity_LSIL" in df_act.columns else None)
+            if sort_5:
+                c5 = pick_top(df_act, sort_5, ascending=False,
+                              extra_filter=lambda df: df["cell_vs_bg_ratio"] > 2.0 if "cell_vs_bg_ratio" in df.columns else None)
+                if c5 is not None:
+                    chosen_ids.append(c5)
+
+            # 6. Top block by selectivity_INFL or selectivity_BG_EXUDATE
+            sort_6 = "selectivity_INFL" if "selectivity_INFL" in df_act.columns else ("selectivity_BG_EXUDATE" if "selectivity_BG_EXUDATE" in df_act.columns else None)
+            if sort_6:
+                c6 = pick_top(df_act, sort_6, ascending=False)
+                if c6 is not None:
+                    chosen_ids.append(c6)
+
+            # Fill up to 6 if still < 6
+            if len(chosen_ids) < 6:
+                fill_col = "cell_vs_bg_ratio" if "cell_vs_bg_ratio" in df_act.columns else "max_selectivity"
+                for _, r in df_act.sort_values(by=fill_col, ascending=False).iterrows():
+                    cid = int(r["concept_id"])
+                    if cid not in chosen_ids:
+                        chosen_ids.append(cid)
+                    if len(chosen_ids) >= 6:
+                        break
+
+        # Fallback to concept_ranking_{sae_type}.csv if needed
+        if len(chosen_ids) < 6 and os.path.exists(ranking_csv):
+            import pandas as pd
+            df_rank = pd.read_csv(ranking_csv)
+            if "concept_id" in df_rank.columns:
+                for cid in df_rank["concept_id"].tolist():
+                    cid = int(cid)
+                    if cid not in chosen_ids:
+                        chosen_ids.append(cid)
+                    if len(chosen_ids) >= 6:
+                        break
+
+        # Ultimate fallback
+        if len(chosen_ids) == 0:
+            chosen_ids = [139, 251, 61, 214, 12, 92]
+
+        final_ids = chosen_ids
+
+    # Ensure fallback descriptions for any chosen ID
+    for cid in final_ids:
+        if cid not in descriptions or not descriptions[cid]:
+            descriptions[cid] = CONCEPT_DESCRIPTIONS.get(cid, "Learned Concept Manifold")
+
+    return final_ids, descriptions
+
 def main():
     parser = argparse.ArgumentParser(
         description="Reproduce Goodfire BSF Paper Figure 9 on RIVA PAP Smear Test Dataset"
@@ -910,8 +1038,8 @@ def main():
     parser.add_argument("--base_image_dir", type=str, default="",
                         help="Base directory containing RIVA dataset images (auto-discovered if empty)")
     parser.add_argument("--concept_ids", type=int, nargs="+",
-                        default=[139, 251, 61, 214, 12, 92],
-                        help="Verified concept block IDs to visualize in Figure 9")
+                        default=None,
+                        help="Concept block IDs to visualize in Figure 9 (auto-selected dynamically if None)")
     parser.add_argument("--crop_size", type=int, default=256,
                         help="Pixel size of each cellular ROI crop (default: 256x256)")
     parser.add_argument("--k", type=int, default=16,
@@ -995,11 +1123,16 @@ def main():
         target_size=1008
     )
 
-    # 7. Process each concept block
+    # 7. Resolve concept blocks and descriptions dynamically
+    concept_ids, dynamic_descriptions = get_dynamic_concepts_and_descriptions(args.sae_type, args.concept_ids)
+    print(f"[INFO] Target Figure 9 Concept IDs: {concept_ids}")
+    for cid in concept_ids:
+        print(f"  - Block C{cid}: {dynamic_descriptions.get(cid, '')}")
+
     processed_blocks = []
     summary_records = []
 
-    for g in args.concept_ids:
+    for g in concept_ids:
         if g < 0 or g >= n_groups:
             print(f"[WARNING] Concept ID {g} out of range [0, {n_groups - 1}]. Skipping.")
             continue
@@ -1020,7 +1153,7 @@ def main():
         processed_blocks.append(block_info)
         summary_records.append({
             "block_id": g,
-            "description": CONCEPT_DESCRIPTIONS.get(g, "Biological Concept"),
+            "description": dynamic_descriptions.get(g, CONCEPT_DESCRIPTIONS.get(g, "Biological Concept")),
             "erank": block_info["erank"],
             "matched_1d_sae": sae_1d_name,
             "matched_1d_atom": block_info["j_star"],
@@ -1070,7 +1203,7 @@ def main():
             is_combined=False
         )
 
-        desc = CONCEPT_DESCRIPTIONS.get(g, "")
+        desc = dynamic_descriptions.get(g, CONCEPT_DESCRIPTIONS.get(g, ""))
         desc_str = f" - {desc}" if desc else ""
         fig_single.suptitle(
             f"BSF Manifold Geometry & Cellular Grounding - Block C{g}{desc_str}",

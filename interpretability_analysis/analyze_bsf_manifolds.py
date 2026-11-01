@@ -639,6 +639,7 @@ def main():
                 loaded_points = feats[::step][:1024].clone()
             else:
                 loaded_points = torch.randn(1024, input_dim, device=device)
+        loaded_points = F.normalize(loaded_points.float(), p=2, dim=-1)
 
     sae_classes = {
         "TopKSAE": lambda d, h, k: TopKSAE(d, h, top_k=k),

@@ -360,6 +360,7 @@ def build_and_load_sae(
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
         else:
             loaded_points = torch.randn(1024, input_dim, device=device)
+        loaded_points = F.normalize(loaded_points.float(), p=2, dim=-1)
 
     sae_constructors = {
         "TopKSAE": lambda: TopKSAE(input_dim, hidden_dim, top_k=k),
@@ -432,6 +433,7 @@ def extract_cell_activations(
     all_cell_records: List[Dict[str, Any]] = []
     total_annotated_cells = 0
     total_bg_tokens = 0
+    rng = np.random.default_rng(42)
 
     with torch.no_grad():
         for batch_imgs, batch_paths, batch_h, batch_w in tqdm(dataloader, desc="Extracting cell concept activations"):
@@ -581,7 +583,7 @@ def extract_cell_activations(
                 bg_r_idx, bg_c_idx = np.where(valid_bg_mask)
                 if len(bg_r_idx) > 0:
                     n_sample = min(len(bg_r_idx), max_bg_tokens_per_img)
-                    sel_indices = np.random.choice(len(bg_r_idx), size=n_sample, replace=False)
+                    sel_indices = rng.choice(len(bg_r_idx), size=n_sample, replace=False)
                     for s_i in sel_indices:
                         r_bg = bg_r_idx[s_i]
                         c_bg = bg_c_idx[s_i]
@@ -789,16 +791,9 @@ def run_bsf_subspace_probe(
     else:
         df_valid["probe_priority"] = df_valid["cell_vs_bg_ratio"]
 
-    # Select top blocks, ensuring block 139 is included if available
+    # Select top blocks purely by probe_priority rank
     top_blocks = df_valid.sort_values(by="probe_priority", ascending=False)["concept_id"].tolist()
-    selected_blocks = []
-    if 139 in top_blocks:
-        selected_blocks.append(139)
-    for b in top_blocks:
-        if b not in selected_blocks:
-            selected_blocks.append(b)
-        if len(selected_blocks) >= top_n_blocks:
-            break
+    selected_blocks = top_blocks[:top_n_blocks]
 
     print(f"[INFO] Running BSF Subspace Probes on Top {len(selected_blocks)} Blocks: {selected_blocks}")
 
@@ -1156,14 +1151,7 @@ def plot_bsf_dysplasia_manifold_projection(
             df_valid["manifold_score"] = df_valid["cell_vs_bg_ratio"]
 
         top_blocks = df_valid.sort_values(by="manifold_score", ascending=False)["concept_id"].tolist()
-        target_blocks = []
-        if 139 in top_blocks:
-            target_blocks.append(139)
-        for b in top_blocks:
-            if b not in target_blocks:
-                target_blocks.append(b)
-            if len(target_blocks) >= 4:
-                break
+        target_blocks = top_blocks[:4]
 
     fig, axes = plt.subplots(2, 2, figsize=(15, 13), dpi=300)
     axes = axes.flatten()
@@ -1320,7 +1308,8 @@ def main(args):
         raise RuntimeError("No annotated images found for evaluation.")
 
     eval_dataset = AnnotatedImageDataset(eval_image_paths, target_size=1008)
-    eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    num_workers = 0 if os.name == "nt" else 2
+    eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
     # 5. Load SAM3 Faster R-CNN Model
     sam3_model = load_sam3_rcnn(args.weight_checkpoint, device)

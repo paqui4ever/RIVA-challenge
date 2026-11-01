@@ -52,11 +52,13 @@ class RATopKSAE(TopKSAE):
         Additional arguments passed to the parent TopKSAE (e.g., encoder_module, device).
     """
 
-    def __init__(self, input_shape, nb_concepts, points, top_k=None, delta=1.0, use_multiplier=True, **kwargs):
+    def __init__(self, input_shape, nb_concepts, points, top_k=None, delta=0.5, use_multiplier=False, **kwargs):
         assert isinstance(input_shape, int), "RATopKSAE input_shape must be an integer."
 
         super().__init__(input_shape=input_shape, nb_concepts=nb_concepts,
                          top_k=top_k, **kwargs)
+
+        points = torch.nn.functional.normalize(points.float(), p=2, dim=-1)
 
         # enforce archetypal dictionary after the init of the parent class
         self.dictionary = RelaxedArchetypalDictionary(
@@ -67,6 +69,10 @@ class RATopKSAE(TopKSAE):
             use_multiplier=use_multiplier,
             device=self.device
         )
+
+    def get_dictionary(self):
+        dict_atoms = self.dictionary.get_dictionary()
+        return torch.nn.functional.normalize(dict_atoms, p=2, dim=-1)
 
 
 class RAJumpSAE(JumpSAE):
