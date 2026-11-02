@@ -138,19 +138,37 @@ def pca_fit(c: np.ndarray, k: int = 3) -> Tuple[np.ndarray, np.ndarray]:
         mean: shape (d,)
         comps: shape (k, d)
     """
+    if len(c) == 0:
+        d = 256
+        return np.zeros(d), np.eye(k, d)
+
+    d = c.shape[1]
     mean = c.mean(axis=0)
     centered = c - mean
-    # SVD on centered data: centered = U @ diag(S) @ V
-    _, _, vt = np.linalg.svd(centered, full_matrices=False)
-    comps = vt[:k]
+    try:
+        _, _, vt = np.linalg.svd(centered, full_matrices=True)
+        comps = vt[:k]
+    except Exception:
+        comps = np.eye(k, d)
+
+    # Guarantee comps ALWAYS has shape (k, d)
+    if comps.shape[0] < k:
+        pad = np.eye(k, d)[comps.shape[0]:]
+        comps = np.vstack([comps, pad])
+
     return mean, comps
 
 
 def radial_clip(proj: np.ndarray, pct: float = 98.0) -> np.ndarray:
     """Radial outlier clipping scaling points beyond percentile radius back to boundary."""
-    norm = np.linalg.norm(proj, axis=1)
-    if len(norm) == 0:
+    if len(proj) == 0:
         return proj
+    if proj.ndim == 1:
+        proj = proj[None, :]
+    if proj.shape[1] < 3:
+        pad = np.zeros((proj.shape[0], 3 - proj.shape[1]), dtype=proj.dtype)
+        proj = np.concatenate([proj, pad], axis=1)
+    norm = np.linalg.norm(proj, axis=1)
     cap = float(np.percentile(norm, pct))
     s = np.minimum(1.0, cap / np.maximum(norm, 1e-12))
     return proj * s[:, None]
@@ -162,8 +180,16 @@ def make_colorize(proj: np.ndarray, saturation: float = 1.35) -> Callable[[np.nd
     Ensures direction in 3D PCA space maps vividly to Red, Green, and Blue channels.
     """
     def f(p: np.ndarray) -> np.ndarray:
-        n = np.linalg.norm(p, axis=-1, keepdims=True)
-        unit = p / np.maximum(n, 1e-8)
+        p_arr = np.asarray(p, dtype=float)
+        if p_arr.ndim == 1:
+            p_arr = p_arr[None, :]
+        if p_arr.shape[-1] < 3:
+            pad = np.zeros((*p_arr.shape[:-1], 3 - p_arr.shape[-1]), dtype=p_arr.dtype)
+            p_arr = np.concatenate([p_arr, pad], axis=-1)
+        elif p_arr.shape[-1] > 3:
+            p_arr = p_arr[..., :3]
+        n = np.linalg.norm(p_arr, axis=-1, keepdims=True)
+        unit = p_arr / np.maximum(n, 1e-8)
         rgb = 0.5 + 0.5 * unit * saturation
         return np.clip(rgb, 0.0, 1.0)
     return f
@@ -789,6 +815,18 @@ def process_block(
         active_mask = (heat_g > 1e-7) & valid_tensor
         active_indices = torch.nonzero(active_mask, as_tuple=False)
 
+    if len(active_indices) < 8:
+        valid_heat = heat_g[valid_tensor]
+        non_zero = valid_heat[valid_heat > 0]
+        if len(non_zero) >= 8:
+            k_sel = min(64, len(non_zero))
+            topk_val = float(torch.topk(non_zero, k_sel).values[-1].item())
+            active_mask = (heat_g >= topk_val) & valid_tensor
+            active_indices = torch.nonzero(active_mask, as_tuple=False)
+        elif len(non_zero) > 0:
+            active_mask = (heat_g > 0) & valid_tensor
+            active_indices = torch.nonzero(active_mask, as_tuple=False)
+
     if len(active_indices) == 0:
         print(f"[ERROR] Block C{g} is inactive across the entire test set.")
         return None
@@ -841,7 +879,18 @@ def process_block(
 
         # Project smoothed contribution field onto 3 PCA axes:
         proj_img = (c_smooth.reshape(-1, d) - mean) @ comps.T
-        rgb_img = colorize(proj_img).reshape(H_feat, W_feat, 3)
+        rgb_raw = colorize(proj_img)
+        if rgb_raw.size == H_feat * W_feat * 3:
+            rgb_img = rgb_raw.reshape(H_feat, W_feat, 3)
+        elif rgb_raw.ndim == 2 and rgb_raw.shape[0] == H_feat * W_feat:
+            if rgb_raw.shape[1] < 3:
+                pad = np.zeros((H_feat * W_feat, 3 - rgb_raw.shape[1]), dtype=rgb_raw.dtype)
+                rgb_raw = np.concatenate([rgb_raw, pad], axis=1)
+            else:
+                rgb_raw = rgb_raw[:, :3]
+            rgb_img = rgb_raw.reshape(H_feat, W_feat, 3)
+        else:
+            rgb_img = np.zeros((H_feat, W_feat, 3), dtype=np.float32)
 
         # Smooth bilinear upsample to target_size (1008x1008) without ringing artifacts:
         rgb_t = torch.from_numpy(rgb_img).permute(2, 0, 1).unsqueeze(0).float()

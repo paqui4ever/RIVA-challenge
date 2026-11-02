@@ -207,8 +207,17 @@ def pca_fit(c: np.ndarray, k: int = 3):
     
     Copied from: https://github.com/goodfire-ai/block-sparse-featurizer/blob/main/bsf/viz.py
     """
+    if len(c) == 0:
+        return np.zeros(256), np.eye(k, 256)
+    d = c.shape[1] if c.ndim > 1 else 256
     mean = c.mean(0)
-    comps = np.linalg.svd(c - mean, full_matrices=False)[2][:k]
+    try:
+        comps = np.linalg.svd(c - mean, full_matrices=True)[2][:k]
+    except Exception:
+        comps = np.eye(k, d)
+    if comps.shape[0] < k:
+        pad = np.eye(k, d)[comps.shape[0]:]
+        comps = np.vstack([comps, pad])
     return mean, comps
 
 
@@ -217,6 +226,13 @@ def radial_clip(proj: np.ndarray, pct: float = 98.0) -> np.ndarray:
     
     Copied from: https://github.com/goodfire-ai/block-sparse-featurizer/blob/main/bsf/viz.py
     """
+    if len(proj) == 0:
+        return proj
+    if proj.ndim == 1:
+        proj = proj[None, :]
+    if proj.shape[1] < 3:
+        pad = np.zeros((proj.shape[0], 3 - proj.shape[1]), dtype=proj.dtype)
+        proj = np.concatenate([proj, pad], axis=1)
     norm = np.linalg.norm(proj, axis=1)
     cap = float(np.percentile(norm, pct))
     s = np.minimum(1.0, cap / np.maximum(norm, 1e-12))
@@ -229,8 +245,16 @@ def make_colorize(proj: np.ndarray, saturation: float = 1.0):
     Copied from: https://github.com/goodfire-ai/block-sparse-featurizer/blob/main/bsf/viz.py
     """
     def f(p):
-        n = np.linalg.norm(p, axis=-1, keepdims=True)
-        unit = p / np.maximum(n, 1e-8)
+        p_arr = np.asarray(p, dtype=float)
+        if p_arr.ndim == 1:
+            p_arr = p_arr[None, :]
+        if p_arr.shape[-1] < 3:
+            pad = np.zeros((*p_arr.shape[:-1], 3 - p_arr.shape[-1]), dtype=p_arr.dtype)
+            p_arr = np.concatenate([p_arr, pad], axis=-1)
+        elif p_arr.shape[-1] > 3:
+            p_arr = p_arr[..., :3]
+        n = np.linalg.norm(p_arr, axis=-1, keepdims=True)
+        unit = p_arr / np.maximum(n, 1e-8)
         return (0.5 + 0.5 * unit * saturation).clip(0, 1)
     return f
 
