@@ -12,12 +12,12 @@ python interpretability_analysis/train_saes.py \
     --target_layer box_head \
     --models all \
     --epochs 10 \
-    --batch_size 4096 \
+    --batch_size 1024 \
     --k 32 \
     --block_size 4 \
     --expansion_factor 4.0 \
     --overwrite_results \
-    --logger none
+    --logger wandb
 
 echo "======================================================================"
 echo "Step 2: Evaluate Downstream Faster R-CNN Faithfulness on box_head"
