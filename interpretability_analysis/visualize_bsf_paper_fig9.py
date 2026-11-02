@@ -53,7 +53,7 @@ from models.sam3_rcnn_v2 import (
     build_sam3_fasterrcnn,
     sam3_resize_longest_side_and_pad_square,
 )
-from interpretability_analysis.train_saes import get_data_splits, ImagePathDataset
+from interpretability_analysis.train_saes import get_data_splits, ImagePathDataset, extract_box_head_spatial_grid
 from overcomplete import TopKSAE
 from custom_saes import (
     RATopKSAE,
@@ -220,7 +220,8 @@ def build_and_load_bsf_model(
     input_dim: int = 256,
     expansion_factor: float = 4.0,
     k: int = 16,
-    block_size: int = 4
+    block_size: int = 4,
+    target_layer: str = "fpn"
 ) -> Tuple[BSF, int]:
     """Instantiates GrassmannianBSF or VanillaBSF and loads trained weights."""
     hidden_dim = int(input_dim * expansion_factor)
@@ -235,10 +236,10 @@ def build_and_load_bsf_model(
 
     ckpt = checkpoint_path
     if not ckpt:
+        ckpt_dir = "./interpretability_analysis/checkpoints_box_head" if target_layer == "box_head" else "./interpretability_analysis/checkpoints"
         candidates = [
-            f"./interpretability_analysis/checkpoints/{sae_type}_sae.pt",
-            f"./interpretability_analysis/checkpoints/{sae_type}.pt",
-            f"./checkpoints/{sae_type}_sae.pt",
+            f"{ckpt_dir}/{sae_type}_sae.pt",
+            f"{ckpt_dir}/{sae_type}.pt",
         ]
         for c in candidates:
             if os.path.exists(c):
@@ -263,19 +264,21 @@ def load_directional_sae_dictionary(
     device: torch.device,
     input_dim: int = 256,
     expansion_factor: float = 4.0,
-    k: int = 16
+    k: int = 16,
+    target_layer: str = "fpn"
 ) -> Tuple[np.ndarray, str]:
     """Loads 1D SAE dictionary W_1D (1024, 256) normalized to unit L2 norm."""
     hidden_dim = int(input_dim * expansion_factor)
 
     resolved_ckpt = directional_sae_checkpoint
     if not resolved_ckpt or not os.path.exists(resolved_ckpt):
+        ckpt_dir = "./interpretability_analysis/checkpoints_box_head" if target_layer == "box_head" else "./interpretability_analysis/checkpoints"
         candidates = [
-            f"./interpretability_analysis/checkpoints/{directional_sae_type}_sae.pt",
-            f"./interpretability_analysis/checkpoints/{directional_sae_type}.pt",
-            f"./interpretability_analysis/checkpoints/OMPSAE_sae.pt",
-            f"./interpretability_analysis/checkpoints/TopKSAE_sae.pt",
-            f"./interpretability_analysis/checkpoints/MPSAE_sae.pt",
+            f"{ckpt_dir}/{directional_sae_type}_sae.pt",
+            f"{ckpt_dir}/{directional_sae_type}.pt",
+            f"{ckpt_dir}/OMPSAE_sae.pt",
+            f"{ckpt_dir}/TopKSAE_sae.pt",
+            f"{ckpt_dir}/MPSAE_sae.pt",
         ]
         for c in candidates:
             if os.path.exists(c):
@@ -382,7 +385,8 @@ def extract_test_features(
     test_paths: List[str],
     device: torch.device,
     batch_size: int = 4,
-    target_size: int = 1008
+    target_size: int = 1008,
+    target_layer: str = "fpn"
 ) -> Dict:
     """Runs inference across the test dataset to extract FPN feature activations,
     BSF latent block coordinates, foreground token masks, and token coordinates."""
@@ -390,10 +394,12 @@ def extract_test_features(
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
     activations = {}
-    def hook_fn(module, input, output):
-        activations["1"] = output["1"].detach()
-
-    handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    if target_layer == "fpn":
+        def hook_fn(module, input, output):
+            activations["1"] = output["1"].detach()
+        handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    else:
+        handle = None
 
     all_images = []
     all_z_blocks = []  # List of tensors of shape (B, H_feat, W_feat, n_groups, group_size)
@@ -408,8 +414,11 @@ def extract_test_features(
             B = batch_dev.shape[0]
             all_images.append(batch_imgs.cpu())
 
-            _ = sam3_model.backbone(batch_dev)
-            feat = activations["1"]
+            if target_layer == "box_head":
+                feat = extract_box_head_spatial_grid(sam3_model, batch_dev, grid_size=28)
+            else:
+                _ = sam3_model.backbone(batch_dev)
+                feat = activations["1"]
             B, C, H_feat, W_feat = feat.shape
             P = H_feat * W_feat
 
@@ -439,7 +448,8 @@ def extract_test_features(
             valid_mask = (mean_rgb_pooled > 0.08) & inner_mask.unsqueeze(0)
             all_valid.append(valid_mask.cpu())
 
-    handle.remove()
+    if handle is not None:
+        handle.remove()
 
     images_tensor = torch.cat(all_images, dim=0)     # (N_img, 3, 1008, 1008)
     z_blocks_tensor = torch.cat(all_z_blocks, dim=0) # (N_img, H_feat, W_feat, n_groups, group_size)
@@ -891,13 +901,17 @@ def process_block(
 # ==============================================================================
 
 
-def get_dynamic_concepts_and_descriptions(sae_type: str, requested_concept_ids: Optional[List[int]] = None) -> Tuple[List[int], Dict[int, str]]:
+def get_dynamic_concepts_and_descriptions(sae_type: str, requested_concept_ids: Optional[List[int]] = None, target_layer: str = "fpn") -> Tuple[List[int], Dict[int, str]]:
     """
     Selects 6 diverse, high-selectivity concept blocks and builds biological descriptions
     from bethesda_class_enrichment_{sae_type}.csv if available, falling back cleanly.
     """
-    enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{sae_type}.csv"
-    ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{sae_type}.csv"
+    if target_layer == "box_head":
+        enrichment_csv = f"./interpretability_analysis/bethesda_attribution_box_head/bethesda_class_enrichment_{sae_type}.csv"
+        ranking_csv = f"./interpretability_analysis/manifold_analysis_box_head/concept_ranking_{sae_type}.csv"
+    else:
+        enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{sae_type}.csv"
+        ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{sae_type}.csv"
 
     descriptions: Dict[int, str] = {}
     df_enrich = None
@@ -1022,6 +1036,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="Reproduce Goodfire BSF Paper Figure 9 on RIVA PAP Smear Test Dataset"
     )
+    parser.add_argument("--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+                        help="Target architecture layer for paper figure 9 (default: 'fpn').")
     parser.add_argument("--sae_type", type=str, default="GrassmannianBSF",
                         choices=["GrassmannianBSF", "VanillaBSF"],
                         help="Block-Sparse Featurizer architecture")
@@ -1063,6 +1079,14 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[INFO] Using device: {device}")
 
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        input_dim = 1024
+        if args.save_dir == "./interpretability_analysis/paper_fig9_visualizations":
+            args.save_dir = "./interpretability_analysis/paper_fig9_visualizations_box_head"
+    else:
+        input_dim = 256
+
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1087,7 +1111,6 @@ def main():
     sam3_model = load_sam3_model(args.weight_checkpoint, device)
 
     # 3. Load BSF model
-    input_dim = 256
     bsf_model, n_groups = build_and_load_bsf_model(
         sae_type=args.sae_type,
         checkpoint_path=args.checkpoint,
@@ -1095,7 +1118,8 @@ def main():
         input_dim=input_dim,
         expansion_factor=args.expansion_factor,
         k=args.k,
-        block_size=args.block_size
+        block_size=args.block_size,
+        target_layer=target_layer
     )
 
     # 4. Load 1D Directional SAE dictionary for baseline arrow comparison
@@ -1105,7 +1129,8 @@ def main():
         device=device,
         input_dim=input_dim,
         expansion_factor=args.expansion_factor,
-        k=args.k
+        k=args.k,
+        target_layer=target_layer
     )
     print(f"[INFO] 1D SAE dictionary loaded: {W_1D.shape} ({sae_1d_name})")
 
@@ -1120,11 +1145,12 @@ def main():
         test_paths=test_paths,
         device=device,
         batch_size=args.batch_size,
-        target_size=1008
+        target_size=1008,
+        target_layer=target_layer
     )
 
     # 7. Resolve concept blocks and descriptions dynamically
-    concept_ids, dynamic_descriptions = get_dynamic_concepts_and_descriptions(args.sae_type, args.concept_ids)
+    concept_ids, dynamic_descriptions = get_dynamic_concepts_and_descriptions(args.sae_type, args.concept_ids, target_layer=target_layer)
     print(f"[INFO] Target Figure 9 Concept IDs: {concept_ids}")
     for cid in concept_ids:
         print(f"  - Block C{cid}: {dynamic_descriptions.get(cid, '')}")

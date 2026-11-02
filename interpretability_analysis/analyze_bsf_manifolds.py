@@ -22,7 +22,7 @@ if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn
-from train_saes import get_data_splits, ImagePathDataset
+from train_saes import get_data_splits, ImagePathDataset, extract_box_head_spatial_grid
 from overcomplete import TopKSAE
 from custom_saes import (
     RATopKSAE,
@@ -80,7 +80,7 @@ def find_annotations_file(annotations_file, dataset_dir):
     return None
 
 
-def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
+def extract_features_and_proxies(sam3_model, sae_model, dataloader, device, target_layer="fpn"):
     """
     Extracts SAM3 FPN features, SAE block coordinates / norms, foreground masks,
     and continuous cytological proxies for every token patch across the dataset.
@@ -91,10 +91,12 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
     is_bsf = hasattr(sae_model, "encode_blocks") and callable(sae_model.encode_blocks)
 
     activations = {}
-    def hook_fn(module, input, output):
-        activations["1"] = output["1"].detach()
-
-    handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    if target_layer == "fpn":
+        def hook_fn(module, input, output):
+            activations["1"] = output["1"].detach()
+        handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    else:
+        handle = None
 
     # Sobel kernels for spatial gradient magnitude
     sobel_x = torch.tensor([[-1., 0., 1.], [-2., 0., 2.], [-1., 0., 1.]], device=device).view(1, 1, 3, 3) / 8.0
@@ -122,9 +124,12 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
             B = batch_dev.shape[0]
             all_images.append(batch.cpu())
 
-            # 1. Forward backbone to trigger hook
-            _ = sam3_model.backbone(batch_dev)
-            feat = activations["1"]
+            # 1. Extract feature map
+            if target_layer == "box_head":
+                feat = extract_box_head_spatial_grid(sam3_model, batch_dev, grid_size=28)
+            else:
+                _ = sam3_model.backbone(batch_dev)
+                feat = activations["1"]
             B, C, H_feat, W_feat = feat.shape
             P = H_feat * W_feat
 
@@ -194,7 +199,8 @@ def extract_features_and_proxies(sam3_model, sae_model, dataloader, device):
 
             img_counter += B
 
-    handle.remove()
+    if handle is not None:
+        handle.remove()
 
     images_tensor = torch.cat(all_images, dim=0)       # (N_img, 3, 1008, 1008)
     z_norm_tensor = torch.cat(all_z_norm, dim=0)       # (N_tokens, G)
@@ -520,6 +526,10 @@ def visualize_subspace_traversals(data, sae_model, target_concepts, sae_type, n_
 
 def main():
     parser = argparse.ArgumentParser(description="Analyze continuous morphological manifolds and 4D subspaces in BSFs.")
+    parser.add_argument("--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+                        help="Target architecture layer for manifold analysis (default: 'fpn').")
+    parser.add_argument("--checkpoint_dir", type=str, default="",
+                        help="Directory containing trained SAE checkpoints.")
     parser.add_argument("--sae_type", type=str, default="GrassmannianBSF",
                         choices=["GrassmannianBSF", "VanillaBSF", "OMPSAE", "MPSAE", "TopKSAE", "RATopKSAE"],
                         help="SAE architecture to evaluate")
@@ -620,18 +630,31 @@ def main():
     num_workers = 0 if os.name == "nt" else 4
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        input_dim = 1024
+        checkpoint_dir = args.checkpoint_dir if args.checkpoint_dir else "./interpretability_analysis/checkpoints_box_head"
+        feat_path_default = "./interpretability_analysis/features_box_head/train_features.pt"
+        if args.save_dir == "./interpretability_analysis/manifold_analysis":
+            args.save_dir = "./interpretability_analysis/manifold_analysis_box_head"
+    else:
+        input_dim = 256
+        checkpoint_dir = args.checkpoint_dir if args.checkpoint_dir else "./interpretability_analysis/checkpoints"
+        feat_path_default = "./interpretability_analysis/features/train_features.pt"
+
     # 3. Instantiate and load SAE
-    input_dim = 256
     hidden_dim = int(input_dim * args.expansion_factor)
 
     loaded_points = None
     if args.sae_type == "RATopKSAE":
-        points_path = "./interpretability_analysis/checkpoints/ratopk_points.pt"
+        points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
         if os.path.exists(points_path):
             print(f"Loading RATopK anchor points from {points_path}")
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
+            if loaded_points.shape[1] != input_dim:
+                loaded_points = torch.randn(1024, input_dim, device=device)
         else:
-            feat_path = "./interpretability_analysis/features/train_features.pt"
+            feat_path = feat_path_default
             if os.path.exists(feat_path):
                 print(f"Sampling RATopK anchor points from {feat_path}")
                 feats = torch.load(feat_path, map_location=device, weights_only=False)
@@ -651,7 +674,7 @@ def main():
     }
 
     sae_model = sae_classes[args.sae_type](input_dim, hidden_dim, args.k)
-    checkpoint_path = args.checkpoint if args.checkpoint else f"./interpretability_analysis/checkpoints/{args.sae_type}_sae.pt"
+    checkpoint_path = args.checkpoint if args.checkpoint else os.path.join(checkpoint_dir, f"{args.sae_type}_sae.pt")
     if os.path.exists(checkpoint_path):
         print(f"Found SAE checkpoint: {checkpoint_path}. Loading...")
         state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -663,7 +686,7 @@ def main():
     sae_model.eval()
 
     # 4. Feature and proxy extraction
-    data = extract_features_and_proxies(sam3_model, sae_model, dataloader, device)
+    data = extract_features_and_proxies(sam3_model, sae_model, dataloader, device, target_layer=target_layer)
 
     # 5. Concept ranking and CSV export
     df_ranked = rank_and_save_concepts(data, args.sae_type, args.save_dir)

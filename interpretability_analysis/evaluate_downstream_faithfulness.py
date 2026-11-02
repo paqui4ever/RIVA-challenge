@@ -171,6 +171,8 @@ def build_and_load_sae_model(
         points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
         if os.path.exists(points_path):
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
+            if loaded_points.shape[1] != input_dim:
+                loaded_points = torch.randn(1024, input_dim, device=device)
         else:
             loaded_points = torch.randn(1024, input_dim, device=device)
         loaded_points = torch.nn.functional.normalize(loaded_points.float(), p=2, dim=-1)
@@ -193,8 +195,6 @@ def build_and_load_sae_model(
     ckpt_candidates = [
         os.path.join(checkpoint_dir, f"{sae_type}_sae.pt"),
         os.path.join(checkpoint_dir, f"{sae_type}.pt"),
-        f"./interpretability_analysis/checkpoints/{sae_type}_sae.pt",
-        f"./interpretability_analysis/checkpoints/{sae_type}.pt",
     ]
 
     loaded = False
@@ -537,7 +537,8 @@ def evaluate_downstream_faithfulness(
     score_threshold: float = 0.3,
     iou_threshold: float = 0.5,
     ablate_other_fpn_levels: bool = False,
-    fpn_level: str = "1"
+    fpn_level: str = "1",
+    target_layer: str = "fpn"
 ) -> pd.DataFrame:
     """
     Executes the baseline pass and interventions for all SAE models + Zero-Ablation.
@@ -608,41 +609,58 @@ def evaluate_downstream_faithfulness(
         total_sq_err = 0.0
         total_sq_var = 0.0
 
-        # Define intervention hook on sam3_model.backbone
-        def make_hook(name, sae_m):
-            def hook_fn(module, input, output):
-                # output is an OrderedDict[str, Tensor] with keys "0", "1", "2", "3"
-                feat = output[fpn_level]  # [B, C, H, W]
-                B, C, H, W = feat.shape
-                feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
+        # Define intervention hook based on target_layer
+        if target_layer == "box_head":
+            def make_box_head_hook(name, sae_m):
+                def hook_fn(module, input, output):
+                    feat_flat = output  # [N_rois, 1024]
+                    if name == "Zero-Ablation":
+                        x_hat_flat = torch.zeros_like(feat_flat)
+                    else:
+                        with torch.no_grad():
+                            _, _, x_hat_flat = sae_m(feat_flat)
 
-                if name == "Zero-Ablation":
-                    x_hat_flat = torch.zeros_like(feat_flat)
-                else:
-                    with torch.no_grad():
-                        _, _, x_hat_flat = sae_m(feat_flat)
+                    nonlocal total_sq_err, total_sq_var
+                    err = feat_flat - x_hat_flat
+                    total_sq_err += float(torch.sum(err ** 2).item())
+                    f_mean = feat_flat.mean(dim=0, keepdim=True)
+                    total_sq_var += float(torch.sum((feat_flat - f_mean) ** 2).item())
 
-                # Compute R2 components
-                nonlocal total_sq_err, total_sq_var
-                err = feat_flat - x_hat_flat
-                total_sq_err += float(torch.sum(err ** 2).item())
-                f_mean = feat_flat.mean(dim=0, keepdim=True)
-                total_sq_var += float(torch.sum((feat_flat - f_mean) ** 2).item())
+                    return x_hat_flat
+                return hook_fn
 
-                # Reconstruct back to spatial tensor [B, C, H, W]
-                x_hat = x_hat_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+            hook_handle = sam3_model.roi_heads.box_head.register_forward_hook(make_box_head_hook(model_name, sae_model))
+        else:
+            def make_hook(name, sae_m):
+                def hook_fn(module, input, output):
+                    feat = output[fpn_level]  # [B, C, H, W]
+                    B, C, H, W = feat.shape
+                    feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
 
-                # Replace in-place and return modified OrderedDict
-                new_out = OrderedDict(output)
-                if ablate_other_fpn_levels:
-                    for k in list(new_out.keys()):
-                        if k != fpn_level:
-                            new_out[k] = torch.zeros_like(new_out[k])
-                new_out[fpn_level] = x_hat
-                return new_out
-            return hook_fn
+                    if name == "Zero-Ablation":
+                        x_hat_flat = torch.zeros_like(feat_flat)
+                    else:
+                        with torch.no_grad():
+                            _, _, x_hat_flat = sae_m(feat_flat)
 
-        hook_handle = sam3_model.backbone.register_forward_hook(make_hook(model_name, sae_model))
+                    nonlocal total_sq_err, total_sq_var
+                    err = feat_flat - x_hat_flat
+                    total_sq_err += float(torch.sum(err ** 2).item())
+                    f_mean = feat_flat.mean(dim=0, keepdim=True)
+                    total_sq_var += float(torch.sum((feat_flat - f_mean) ** 2).item())
+
+                    x_hat = x_hat_flat.view(B, H, W, C).permute(0, 3, 1, 2).contiguous()
+
+                    new_out = OrderedDict(output)
+                    if ablate_other_fpn_levels:
+                        for k in list(new_out.keys()):
+                            if k != fpn_level:
+                                new_out[k] = torch.zeros_like(new_out[k])
+                    new_out[fpn_level] = x_hat
+                    return new_out
+                return hook_fn
+
+            hook_handle = sam3_model.backbone.register_forward_hook(make_hook(model_name, sae_model))
 
         total_matched = 0
         total_class_agreed = 0
@@ -732,7 +750,7 @@ def evaluate_downstream_faithfulness(
 # Visualization Plot
 # ==============================================================================
 
-def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str):
+def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str, fpn_level: str = "1", target_layer: str = "fpn"):
     """Generates a publication-quality 4-panel comparison bar plot."""
     fig, axes = plt.subplots(2, 2, figsize=(15, 11), dpi=300)
     axes = axes.flatten()
@@ -804,7 +822,8 @@ def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str):
     ax = axes[3]
     bars = ax.bar(models, df_results["r2_fpn"], color=colors, edgecolor="black", linewidth=1.2)
     ax.set_ylabel("Feature Reconstruction R²", fontsize=11, fontweight="bold")
-    ax.set_title("FPN Layer '1' Sparse Feature Reconstruction Quality", fontsize=12, fontweight="bold")
+    layer_title = "Box Head (1024-D)" if target_layer == "box_head" else f"FPN Layer '{fpn_level}'"
+    ax.set_title(f"{layer_title} Sparse Feature Reconstruction Quality", fontsize=12, fontweight="bold")
     ax.grid(True, linestyle="--", alpha=0.35, axis="y")
     ax.axhline(0, color="black", linewidth=0.8, linestyle="-")
     ax.set_xticks(range(len(models)))
@@ -823,8 +842,8 @@ def plot_faithfulness_comparison(df_results: pd.DataFrame, save_path: str):
                     ha="center", va=va_mode, fontsize=8, fontweight="bold")
 
     plt.suptitle(
-        "Downstream Faster R-CNN Intervention Faithfulness Evaluation\n"
-        "(In-Place Sparse FPN Reconstruction vs. Unperturbed Detection Baseline)",
+        f"Downstream Faster R-CNN Intervention Faithfulness Evaluation\n"
+        f"(In-Place Sparse {layer_title} Reconstruction vs. Unperturbed Detection Baseline)",
         fontsize=14, fontweight="bold", y=0.99
     )
     plt.tight_layout()
@@ -870,6 +889,23 @@ def main(args):
     num_workers = 0 if os.name == "nt" else 2
     eval_loader = DataLoader(eval_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        input_dim = 1024
+        if args.checkpoint_dir == "./interpretability_analysis/checkpoints":
+            args.checkpoint_dir = "./interpretability_analysis/checkpoints_box_head"
+        if args.save_csv == "./interpretability_analysis/results/sae_downstream_faithfulness.csv":
+            args.save_csv = "./interpretability_analysis/results_box_head/sae_downstream_faithfulness.csv"
+        if args.save_plot == "./interpretability_analysis/results/sae_downstream_faithfulness.png":
+            args.save_plot = "./interpretability_analysis/results_box_head/sae_downstream_faithfulness.png"
+    else:
+        input_dim = 256
+
+    save_csv_path = Path(args.save_csv)
+    save_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    save_plot_path = Path(args.save_plot)
+    save_plot_path.parent.mkdir(parents=True, exist_ok=True)
+
     # 2. Load SAM3 Faster R-CNN
     sam3_model = load_sam3_detector(args.weight_checkpoint, device)
 
@@ -906,7 +942,7 @@ def main(args):
             sae_type=sae_type,
             checkpoint_dir=args.checkpoint_dir,
             device=device,
-            input_dim=256,
+            input_dim=input_dim,
             expansion_factor=args.expansion_factor,
             k=args.k,
             block_size=args.block_size
@@ -925,14 +961,15 @@ def main(args):
         score_threshold=args.score_threshold,
         iou_threshold=args.iou_threshold,
         ablate_other_fpn_levels=getattr(args, "ablate_other_fpn_levels", False),
-        fpn_level=getattr(args, "fpn_level", "1")
+        fpn_level=getattr(args, "fpn_level", "1"),
+        target_layer=target_layer
     )
 
     # 5. Save Table & Plot
     df_results.to_csv(str(save_csv_path), index=False)
     print(f"\n[INFO] Saved downstream faithfulness results to {save_csv_path}")
 
-    plot_faithfulness_comparison(df_results, str(save_plot_path))
+    plot_faithfulness_comparison(df_results, str(save_plot_path), fpn_level=getattr(args, "fpn_level", "1"), target_layer=target_layer)
 
     print("\n" + "="*80)
     print("FINAL SUMMARY: Downstream Faster R-CNN Faithfulness")
@@ -945,6 +982,10 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Downstream Faster R-CNN Detection & Classification Faithfulness Evaluation."
+    )
+    parser.add_argument(
+        "--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+        help="Target architecture layer for downstream faithfulness (default: 'fpn')."
     )
     parser.add_argument(
         "--sae_types", nargs="+",

@@ -13,7 +13,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from models.sam3_rcnn_v2 import build_sam3_fasterrcnn
 
 # Import dataset and splitting utility from the training script
-from interpretability_analysis.train_saes import get_data_splits, ImagePathDataset
+from interpretability_analysis.train_saes import get_data_splits, ImagePathDataset, extract_box_head_spatial_grid
 
 # Import SAE models
 from overcomplete import TopKSAE
@@ -37,17 +37,19 @@ from overcomplete.visualization import (
     contour_top_image
 )
 
-def extract_images_and_heatmaps(sam3_model, sae_model, dataloader, device):
+def extract_images_and_heatmaps(sam3_model, sae_model, dataloader, device, target_layer="fpn"):
     all_images = []
     all_heatmaps = []
     all_z_blocks = []
 
     # Hook to capture FPN features
     activations = {}
-    def hook_fn(module, input, output):
-        activations["1"] = output["1"].detach()
-
-    handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    if target_layer == "fpn":
+        def hook_fn(module, input, output):
+            activations["1"] = output["1"].detach()
+        handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    else:
+        handle = None
 
     sam3_model.eval()
     sae_model.eval()
@@ -60,10 +62,12 @@ def extract_images_and_heatmaps(sam3_model, sae_model, dataloader, device):
             # Store original padded images (B, C, 1008, 1008)
             all_images.append(batch.cpu())
 
-            # Forward pass through backbone
-            _ = sam3_model.backbone(batch)
-            
-            feat = activations["1"]
+            # Forward pass / feature extraction
+            if target_layer == "box_head":
+                feat = extract_box_head_spatial_grid(sam3_model, batch, grid_size=28)
+            else:
+                _ = sam3_model.backbone(batch)
+                feat = activations["1"]
             B, C, H_feat, W_feat = feat.shape
             
             # Flatten spatial dimensions: [B, C, H, W] -> [B*H*W, C]
@@ -81,7 +85,8 @@ def extract_images_and_heatmaps(sam3_model, sae_model, dataloader, device):
                 z_blk = sae_model.encode_blocks(feat_flat)
                 all_z_blocks.append(z_blk.cpu())
 
-    handle.remove()
+    if handle is not None:
+        handle.remove()
 
     images_tensor = torch.cat(all_images, dim=0)
     heatmaps_tensor = torch.cat(all_heatmaps, dim=0)
@@ -127,21 +132,32 @@ def main(args):
     num_workers = 0 if os.name == "nt" else 4
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=num_workers)
 
-    # Determine input_dim (assume same as train_saes.py logic for FPN)
-    # The SAM3 FPN output typically has 256 channels
-    input_dim = 256
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        input_dim = 1024
+        ckpt_dir = "./interpretability_analysis/checkpoints_box_head"
+        feat_path_default = "./interpretability_analysis/features_box_head/train_features.pt"
+        if args.save_dir == "./interpretability_analysis/visualizations":
+            args.save_dir = "./interpretability_analysis/visualizations_box_head"
+    else:
+        input_dim = 256
+        ckpt_dir = "./interpretability_analysis/checkpoints"
+        feat_path_default = "./interpretability_analysis/features/train_features.pt"
+
     hidden_dim = int(input_dim * args.expansion_factor)
-    print(f"SAE Input Dim: {input_dim}, Hidden Dim: {hidden_dim}")
+    print(f"SAE Target Layer: {target_layer}, Input Dim: {input_dim}, Hidden Dim: {hidden_dim}")
 
     # Load RATopK anchor points if needed
     loaded_points = None
     if args.sae_type == "RATopKSAE":
-        points_path = "./interpretability_analysis/checkpoints/ratopk_points.pt"
+        points_path = os.path.join(ckpt_dir, "ratopk_points.pt")
         if os.path.exists(points_path):
             print(f"Loading RATopK anchor points from {points_path}")
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
+            if loaded_points.shape[1] != input_dim:
+                loaded_points = torch.randn(1024, input_dim, device=device)
         else:
-            feat_path = "./interpretability_analysis/features/train_features.pt"
+            feat_path = feat_path_default
             if os.path.exists(feat_path):
                 print(f"Sampling RATopK anchor points from {feat_path}")
                 feats = torch.load(feat_path, map_location=device, weights_only=False)
@@ -171,7 +187,7 @@ def main(args):
     
     checkpoint_path = args.checkpoint
     if not checkpoint_path:
-        checkpoint_path = f"./interpretability_analysis/checkpoints/{args.sae_type}_sae.pt"
+        checkpoint_path = os.path.join(ckpt_dir, f"{args.sae_type}_sae.pt")
     
     if os.path.exists(checkpoint_path):
         print(f"Loading SAE checkpoint from {checkpoint_path}")
@@ -183,7 +199,7 @@ def main(args):
 
     # 4. Extract Images and Heatmaps
     print("Extracting images and computing heatmaps...")
-    images, heatmaps, z_blocks, grid_size = extract_images_and_heatmaps(sam3_model, sae_model, test_loader, device)
+    images, heatmaps, z_blocks, grid_size = extract_images_and_heatmaps(sam3_model, sae_model, test_loader, device, target_layer=target_layer)
     
     print(f"Images tensor shape: {images.shape}")
     print(f"Heatmaps tensor shape: {heatmaps.shape}")
@@ -200,8 +216,12 @@ def main(args):
         target_concept_ids.extend(args.concept_id)
 
     if not target_concept_ids:
-        ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{args.sae_type}.csv"
-        enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{args.sae_type}.csv"
+        if target_layer == "box_head":
+            ranking_csv = f"./interpretability_analysis/manifold_analysis_box_head/concept_ranking_{args.sae_type}.csv"
+            enrichment_csv = f"./interpretability_analysis/bethesda_attribution_box_head/bethesda_class_enrichment_{args.sae_type}.csv"
+        else:
+            ranking_csv = f"./interpretability_analysis/manifold_analysis/concept_ranking_{args.sae_type}.csv"
+            enrichment_csv = f"./interpretability_analysis/bethesda_attribution/bethesda_class_enrichment_{args.sae_type}.csv"
         if os.path.exists(ranking_csv):
             import pandas as pd
             df_rank = pd.read_csv(ranking_csv)
@@ -298,6 +318,8 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize learned concepts from trained SAEs.")
+    parser.add_argument("--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+                        help="Target architecture layer for visualization (default: 'fpn').")
     parser.add_argument("--sae_type", type=str, default="TopKSAE", 
                         choices=["TopKSAE", "RATopKSAE", "MPSAE", "OMPSAE", "VanillaBSF", "GrassmannianBSF"], 
                         help="Type of SAE to visualize")

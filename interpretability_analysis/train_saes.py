@@ -99,7 +99,52 @@ def get_data_splits(base_dir, seed=42):
         val_files_all[mid_point:]
     )
 
-def extract_and_cache_features(model, image_paths, cache_path, device, batch_size=1):
+
+def extract_box_head_spatial_grid(sam3_model, batch_imgs, grid_size=28, box_size=98.4375):
+    """
+    Given batch_imgs of shape (B, 3, 1008, 1008) on device:
+    1. Normalizes batch_imgs with backbone mean/std.
+    2. Runs backbone to get FPN feature maps.
+    3. Constructs a regular grid_size x grid_size (default 28x28 = 784) grid of boxes over 1008x1008.
+    4. Pools with box_roi_pool and runs box_head -> (B * 784, 1024).
+    5. Returns spatial tensor of shape (B, 1024, grid_size, grid_size).
+    """
+    device = batch_imgs.device
+    B = batch_imgs.shape[0]
+
+    mean_val = getattr(sam3_model.backbone, "image_mean", [0.5, 0.5, 0.5])
+    std_val = getattr(sam3_model.backbone, "image_std", [0.5, 0.5, 0.5])
+    mean = torch.tensor(mean_val, device=device).view(1, 3, 1, 1)
+    std = torch.tensor(std_val, device=device).view(1, 3, 1, 1)
+    norm_imgs = (batch_imgs - mean) / std
+
+    fpn_feats = sam3_model.backbone(norm_imgs)
+
+    stride = 1008.0 / float(grid_size)
+    half = box_size / 2.0
+
+    boxes_coords = []
+    for r in range(grid_size):
+        cy = (r + 0.5) * stride
+        y1 = max(0.0, cy - half)
+        y2 = min(1008.0, cy + half)
+        for c in range(grid_size):
+            cx = (c + 0.5) * stride
+            x1 = max(0.0, cx - half)
+            x2 = min(1008.0, cx + half)
+            boxes_coords.append([x1, y1, x2, y2])
+
+    grid_boxes = torch.tensor(boxes_coords, dtype=torch.float32, device=device)
+    boxes_list = [grid_boxes for _ in range(B)]
+    image_shapes = [(1008, 1008) for _ in range(B)]
+
+    pooled = sam3_model.roi_heads.box_roi_pool(fpn_feats, boxes_list, image_shapes)
+    box_feats = sam3_model.roi_heads.box_head(pooled)  # (B * 784, 1024)
+
+    spatial_feats = box_feats.view(B, grid_size, grid_size, 1024).permute(0, 3, 1, 2).contiguous()
+    return spatial_feats
+
+def extract_and_cache_features(model, image_paths, cache_path, device, batch_size=1, target_layer="fpn"):
     if os.path.exists(cache_path):
         print(f"Loading cached features from {cache_path}")
         return torch.load(cache_path, weights_only=False)
@@ -110,34 +155,59 @@ def extract_and_cache_features(model, image_paths, cache_path, device, batch_siz
             "Please specify the dataset path using --base_image_dir or --dataset_path."
         )
 
-    print(f"Extracting features to {cache_path} from {len(image_paths)} images...")
+    print(f"Extracting features ({target_layer}) to {cache_path} from {len(image_paths)} images...")
     dataset = ImagePathDataset(image_paths)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    activations = []
-    
-    def hook_fn(module, input, output):
-        # Flatten spatial dims: [B, C, H, W] -> [B, C, H*W] -> [B*H*W, C]
-        feat = output["1"].detach().cpu()
-        B, C, H, W = feat.shape
-        feat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
-        activations.append(feat)
-
-    # Register hook on the FPN backbone
-    handle = model.backbone.register_forward_hook(hook_fn)
-    
     model.eval()
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Extracting"):
-            batch = batch.to(device)
-            _ = model.backbone(batch) # Forward pass only backbone
-            
-    handle.remove()
-    
+    activations = []
+
+    if target_layer == "box_head":
+        rng = np.random.default_rng(42)
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting (box_head)"):
+                batch_dev = batch.to(device)
+                B = len(batch)
+
+                # 1. Collect live RPN proposal box_head activations
+                live_box_feats = []
+                def box_hook(module, input, output):
+                    live_box_feats.append(output.detach().cpu())
+
+                handle = model.roi_heads.box_head.register_forward_hook(box_hook)
+                try:
+                    _ = model([img for img in batch_dev])
+                finally:
+                    handle.remove()
+
+                if live_box_feats:
+                    cat_live = torch.cat(live_box_feats, dim=0)
+                    cat_live = cat_live[: 256 * B]
+                    activations.append(cat_live)
+
+                # 2. Extract regular grid features
+                grid_feat = extract_box_head_spatial_grid(model, batch_dev, grid_size=28)
+                grid_flat = grid_feat.view(B, 1024, -1).permute(0, 2, 1).contiguous().view(-1, 1024).cpu()
+                n_sub = min(256 * B, len(grid_flat))
+                sel_idx = rng.choice(len(grid_flat), size=n_sub, replace=False)
+                activations.append(grid_flat[sel_idx])
+    else:
+        def hook_fn(module, input, output):
+            feat = output["1"].detach().cpu()
+            B, C, H, W = feat.shape
+            feat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
+            activations.append(feat)
+
+        handle = model.backbone.register_forward_hook(hook_fn)
+        with torch.no_grad():
+            for batch in tqdm(dataloader, desc="Extracting (fpn)"):
+                batch = batch.to(device)
+                _ = model.backbone(batch)
+        handle.remove()
+
     all_features = torch.cat(activations, dim=0)
     print(f"Extracted features shape: {all_features.shape}")
-    
-    # Save to disk
+
     os.makedirs(os.path.dirname(cache_path), exist_ok=True)
     torch.save(all_features, cache_path)
     return all_features
@@ -441,7 +511,16 @@ def main(args):
     else:
         logger = None
 
-    cache_dir = "./interpretability_analysis/features"
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        cache_dir = "./interpretability_analysis/features_box_head"
+        checkpoint_dir = "./interpretability_analysis/checkpoints_box_head"
+        if args.results_dir == "./interpretability_analysis/results":
+            args.results_dir = "./interpretability_analysis/results_box_head"
+    else:
+        cache_dir = "./interpretability_analysis/features"
+        checkpoint_dir = "./interpretability_analysis/checkpoints"
+
     train_cache = os.path.join(cache_dir, "train_features.pt")
     val_cache = os.path.join(cache_dir, "val_features.pt")
 
@@ -501,8 +580,8 @@ def main(args):
         print(f"Using dataset from: {resolved_base_dir}")
         print(f"Data Splits -> Train: {len(train_paths)}, Val: {len(val_paths)}, Test: {len(test_paths)}")
 
-        train_features = extract_and_cache_features(model, train_paths, train_cache, device)
-        val_features = extract_and_cache_features(model, val_paths, val_cache, device)
+        train_features = extract_and_cache_features(model, train_paths, train_cache, device, target_layer=target_layer)
+        val_features = extract_and_cache_features(model, val_paths, val_cache, device, target_layer=target_layer)
     # Test set extraction can be done later if needed for final eval
     # test_features = extract_and_cache_features(model, test_paths, os.path.join(cache_dir, "test_features.pt"), device)
 
@@ -511,17 +590,25 @@ def main(args):
     n_groups = max(1, hidden_dim // args.block_size)
     print(f"Input Dim: {input_dim}, Hidden Dim: {hidden_dim}, BSF Groups: {n_groups} (Group Size: {args.block_size})")
 
-    checkpoint_dir = "./interpretability_analysis/checkpoints"
     os.makedirs(checkpoint_dir, exist_ok=True)
 
     points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
     if os.path.exists(points_path):
         init_points = torch.load(points_path, map_location=device, weights_only=False)
-        mean_norm = init_points.norm(dim=-1).mean().item()
-        if abs(mean_norm - 1.0) > 0.05:
-            print(f"[INFO] Loaded ratopk_points.pt mean norm is {mean_norm:.4f} (!= 1.0). Normalizing and re-saving...")
-            init_points = torch.nn.functional.normalize(init_points.float(), p=2, dim=-1)
+        if init_points.shape[1] != input_dim:
+            print(f"[INFO] Existing ratopk_points.pt dim ({init_points.shape[1]}) != input_dim ({input_dim}). Re-sampling...")
+            norms = train_features.norm(dim=-1)
+            valid_idx = torch.where(norms > torch.quantile(norms[:100000], 0.30))[0]
+            g = torch.Generator().manual_seed(42)
+            perm = valid_idx[torch.randperm(len(valid_idx), generator=g)[:1024]]
+            init_points = torch.nn.functional.normalize(train_features[perm].clone().float(), p=2, dim=-1)
             torch.save(init_points.cpu(), points_path)
+        else:
+            mean_norm = init_points.norm(dim=-1).mean().item()
+            if abs(mean_norm - 1.0) > 0.05:
+                print(f"[INFO] Loaded ratopk_points.pt mean norm is {mean_norm:.4f} (!= 1.0). Normalizing and re-saving...")
+                init_points = torch.nn.functional.normalize(init_points.float(), p=2, dim=-1)
+                torch.save(init_points.cpu(), points_path)
     else:
         # Filter out low-energy background/padding tokens (top 70% by L2 norm)
         norms = train_features.norm(dim=-1)
@@ -704,6 +791,8 @@ def main(args):
 if __name__ == "__main__":
     available_choices = ["all", "TopKSAE", "RATopKSAE", "MPSAE", "OMPSAE", "VanillaBSF", "GrassmannianBSF"]
     parser = argparse.ArgumentParser(description="Train SAEs and BSFs on SAM3 Faster R-CNN features")
+    parser.add_argument("--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+                        help="Target architecture layer for SAE interpretability (default: 'fpn').")
     parser.add_argument("--models", nargs="+", default=["all"], choices=available_choices,
                         help="List of SAE/BSF models to train. (default: all)")
     parser.add_argument("--quick_test", action="store_true",

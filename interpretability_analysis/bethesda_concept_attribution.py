@@ -1,3 +1,4 @@
+from train_saes import extract_box_head_spatial_grid
 """
 Bethesda Concept Attribution Pipeline
 ======================================
@@ -358,6 +359,8 @@ def build_and_load_sae(
         points_path = os.path.join(checkpoint_dir, "ratopk_points.pt")
         if os.path.exists(points_path):
             loaded_points = torch.load(points_path, map_location=device, weights_only=False)
+            if loaded_points.shape[1] != input_dim:
+                loaded_points = torch.randn(1024, input_dim, device=device)
         else:
             loaded_points = torch.randn(1024, input_dim, device=device)
         loaded_points = F.normalize(loaded_points.float(), p=2, dim=-1)
@@ -414,7 +417,8 @@ def extract_cell_activations(
     is_bsf: bool,
     num_concepts: int,
     device: torch.device,
-    max_bg_tokens_per_img: int = 20
+    max_bg_tokens_per_img: int = 20,
+    target_layer: str = "fpn"
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Extracts SAM3 FPN features, computes SAE/BSF activations, maps ground-truth
@@ -425,25 +429,31 @@ def extract_cell_activations(
     sae_model.eval()
 
     activations = {}
-    def hook_fn(module, input, output):
-        activations["1"] = output["1"].detach()
-
-    handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    if target_layer == "fpn":
+        def hook_fn(module, input, output):
+            activations["1"] = output["1"].detach()
+        handle = sam3_model.backbone.register_forward_hook(hook_fn)
+    else:
+        handle = None
 
     all_cell_records: List[Dict[str, Any]] = []
     total_annotated_cells = 0
     total_bg_tokens = 0
     rng = np.random.default_rng(42)
 
-    with torch.no_grad():
-        for batch_imgs, batch_paths, batch_h, batch_w in tqdm(dataloader, desc="Extracting cell concept activations"):
-            B = batch_imgs.shape[0]
-            batch_dev = batch_imgs.to(device)
+    try:
+        with torch.no_grad():
+            for batch_imgs, batch_paths, batch_h, batch_w in tqdm(dataloader, desc="Extracting cell concept activations"):
+                B = batch_imgs.shape[0]
+                batch_dev = batch_imgs.to(device)
 
-            # 1. Forward SAM3 backbone
-            _ = sam3_model.backbone(batch_dev)
-            feat = activations["1"]  # (B, C, H_feat, W_feat)
-            B, C, H_feat, W_feat = feat.shape
+                # 1. Extract feature map
+                if target_layer == "box_head":
+                    feat = extract_box_head_spatial_grid(sam3_model, batch_dev, grid_size=28)
+                else:
+                    _ = sam3_model.backbone(batch_dev)
+                    feat = activations["1"]
+                B, C, H_feat, W_feat = feat.shape
 
             # Flatten to pass through SAE
             feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
@@ -573,8 +583,9 @@ def extract_cell_activations(
                             if mean_rgb_pooled[r, c] > 0.08:
                                 # Distance constraint: at least 3 FPN grid cells from any cell center
                                 is_far = True
+                                min_dist = 2 if target_layer == "box_head" else 3
                                 for (cr, cc) in cell_grid_centers:
-                                    if max(abs(r - cr), abs(c - cc)) < 3:
+                                    if max(abs(r - cr), abs(c - cc)) < min_dist:
                                         is_far = False
                                         break
                                 if is_far:
@@ -615,7 +626,9 @@ def extract_cell_activations(
                         all_cell_records.append(record)
                         total_bg_tokens += 1
 
-    handle.remove()
+    finally:
+        if handle is not None:
+            handle.remove()
 
     meta = {
         "num_concepts": num_concepts,
@@ -1246,6 +1259,16 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"=== Running Bethesda Concept Attribution Pipeline on {device} ===")
 
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        input_dim = 1024
+        if args.checkpoint_dir == "./interpretability_analysis/checkpoints":
+            args.checkpoint_dir = "./interpretability_analysis/checkpoints_box_head"
+        if args.save_dir == "./interpretability_analysis/bethesda_attribution":
+            args.save_dir = "./interpretability_analysis/bethesda_attribution_box_head"
+    else:
+        input_dim = 256
+
     # 1. Output directory
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -1323,7 +1346,7 @@ def main(args):
             sae_type=sae_type,
             checkpoint_dir=args.checkpoint_dir,
             device=device,
-            input_dim=256,
+            input_dim=input_dim,
             expansion_factor=args.expansion_factor,
             k=args.k,
             block_size=args.block_size
@@ -1337,7 +1360,8 @@ def main(args):
             annotations_by_img=annotations_by_img,
             is_bsf=is_bsf,
             num_concepts=num_concepts,
-            device=device
+            device=device,
+            target_layer=target_layer
         )
 
         # Compute Bethesda Class Attribution Metrics
@@ -1395,6 +1419,10 @@ if __name__ == "__main__":
         "--sae_types", nargs="+",
         default=["GrassmannianBSF", "OMPSAE", "TopKSAE", "MPSAE", "VanillaBSF", "RATopKSAE"],
         help="List of SAE architectures to evaluate."
+    )
+    parser.add_argument(
+        "--target_layer", type=str, default="fpn", choices=["fpn", "box_head"],
+        help="Target architecture layer for interpretability analysis (default: 'fpn')."
     )
     parser.add_argument(
         "--checkpoint_dir", type=str, default="./interpretability_analysis/checkpoints",
