@@ -1,51 +1,33 @@
 {
-  "sae_type": "GrassmannianBSF",
+  "sae_type": "VanillaBSF",
   "directional_sae_type": "OMPSAE",
   "n_test_images": 66,
   "concept_blocks": [
     {
-      "block_id": 403,
+      "block_id": 419,
       "description": "Dysplasia Progression Trajectory",
-      "erank": 2.574948310852051,
+      "erank": 2.585393190383911,
       "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 3362,
-      "projection_norm": 0.4467375874519348,
+      "matched_1d_atom": 1417,
+      "projection_norm": 0.7371926307678223,
       "n_crops": 10
     },
     {
-      "block_id": 835,
-      "description": "SCC-Selective Manifold (3.1x sel, Cell/BG=18.0x)",
-      "erank": 2.7810680866241455,
+      "block_id": 265,
+      "description": "SCC-Selective Manifold (2.9x sel, Cell/BG=15.0x)",
+      "erank": 2.325464963912964,
       "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 1516,
-      "projection_norm": 0.3341318964958191,
+      "matched_1d_atom": 116,
+      "projection_norm": 0.5596633553504944,
       "n_crops": 10
     },
     {
-      "block_id": 647,
-      "description": "SCC-Selective Manifold (10.2x sel, Cell/BG=2.6x)",
-      "erank": 3.645902633666992,
+      "block_id": 881,
+      "description": "INFL-Selective Manifold (1.6x sel, Cell/BG=651.8x)",
+      "erank": 2.5128302574157715,
       "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 1037,
-      "projection_norm": 0.13420845568180084,
-      "n_crops": 10
-    },
-    {
-      "block_id": 753,
-      "description": "NILM-Selective Manifold (4.5x sel, Cell/BG=247.8x)",
-      "erank": 2.691357135772705,
-      "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 744,
-      "projection_norm": 0.2859247326850891,
-      "n_crops": 10
-    },
-    {
-      "block_id": 574,
-      "description": "INFL-Selective Manifold (14.3x sel, Cell/BG=5.3x)",
-      "erank": 2.882923126220703,
-      "matched_1d_sae": "OMPSAE",
-      "matched_1d_atom": 4060,
-      "projection_norm": 0.14374415576457977,
+      "matched_1d_atom": 986,
+      "projection_norm": 0.4388665556907654,
       "n_crops": 10
     }
   ]
