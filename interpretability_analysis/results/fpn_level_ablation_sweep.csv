@@ -1,0 +1,10 @@
+condition,f1_box_retention,f1_drop,box_recall,box_precision,class_agreement_pct,mean_score_correlation,baseline_boxes_count,intervention_boxes_count,matched_boxes_count,roi_routing_pct_on_target_level
+Zero-Ablate-Level-0,62.07,37.93,45.0,100.0,95.95,0.8566,1151,518,518,86.68
+Zero-Ablate-Level-1,98.14,1.86,96.52,99.82,98.47,0.9819,1151,1113,1111,12.38
+Zero-Ablate-Level-2,87.98,12.02,78.89,99.45,93.06,0.9433,1151,913,908,0.22
+Zero-Ablate-Level-3,99.96,0.04,100.0,99.91,100.0,1.0,1151,1152,1151,0.72
+Keep-Only-Level-0,14.79,85.21,7.99,98.92,93.48,0.9374,1151,93,92,86.68
+Keep-Only-Level-1,21.21,78.79,11.9,97.16,89.78,0.4857,1151,141,137,12.38
+Keep-Only-Level-2,0.0,100.0,0.0,0.0,0.0,0.0,1151,0,0,0.22
+Keep-Only-Level-3,0.0,100.0,0.0,0.0,0.0,0.0,1151,0,0,0.72
+Zero-Ablate-All,0.0,100.0,0.0,0.0,0.0,0.0,1151,0,0,
