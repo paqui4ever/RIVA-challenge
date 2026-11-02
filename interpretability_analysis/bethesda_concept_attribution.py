@@ -384,8 +384,6 @@ def build_and_load_sae(
     ckpt_candidates = [
         os.path.join(checkpoint_dir, f"{sae_type}_sae.pt"),
         os.path.join(checkpoint_dir, f"{sae_type}.pt"),
-        f"./interpretability_analysis/checkpoints/{sae_type}_sae.pt",
-        f"./interpretability_analysis/checkpoints/{sae_type}.pt",
     ]
 
     loaded = False
@@ -440,6 +438,8 @@ def extract_cell_activations(
     total_annotated_cells = 0
     total_bg_tokens = 0
     rng = np.random.default_rng(42)
+    H_feat = 28
+    W_feat = 28
 
     try:
         with torch.no_grad():
@@ -455,176 +455,176 @@ def extract_cell_activations(
                     feat = activations["1"]
                 B, C, H_feat, W_feat = feat.shape
 
-            # Flatten to pass through SAE
-            feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
+                # Flatten to pass through SAE
+                feat_flat = feat.view(B, C, -1).permute(0, 2, 1).contiguous().view(-1, C)
 
-            # 2. Forward SAE/BSF
-            if is_bsf:
-                z_blk = sae_model.encode_blocks(feat_flat)  # (B*P, n_groups, group_size)
-                z_norm = z_blk.norm(dim=-1)                 # (B*P, n_groups)
-                z_spatial = z_norm.view(B, H_feat, W_feat, num_concepts)
-                group_size = z_blk.shape[-1]
-                z_blocks_spatial = z_blk.view(B, H_feat, W_feat, num_concepts, group_size)
-            else:
-                _, z, _ = sae_model(feat_flat)
-                z_spatial = z.view(B, H_feat, W_feat, num_concepts)
-                z_blocks_spatial = None
-                group_size = None
+                # 2. Forward SAE/BSF
+                if is_bsf:
+                    z_blk = sae_model.encode_blocks(feat_flat)  # (B*P, n_groups, group_size)
+                    z_norm = z_blk.norm(dim=-1)                 # (B*P, n_groups)
+                    z_spatial = z_norm.view(B, H_feat, W_feat, num_concepts)
+                    group_size = z_blk.shape[-1]
+                    z_blocks_spatial = z_blk.view(B, H_feat, W_feat, num_concepts, group_size)
+                else:
+                    _, z, _ = sae_model(feat_flat)
+                    z_spatial = z.view(B, H_feat, W_feat, num_concepts)
+                    z_blocks_spatial = None
+                    group_size = None
 
-            # Move activations to CPU for pooling
-            z_spatial_cpu = z_spatial.cpu()
-            if is_bsf:
-                z_blocks_spatial_cpu = z_blocks_spatial.cpu()
+                # Move activations to CPU for pooling
+                z_spatial_cpu = z_spatial.cpu()
+                if is_bsf:
+                    z_blocks_spatial_cpu = z_blocks_spatial.cpu()
 
-            # 3. Process each image in batch
-            for b in range(B):
-                img_path = batch_paths[b]
-                img_filename = os.path.basename(img_path)
-                h_orig = int(batch_h[b])
-                w_orig = int(batch_w[b])
+                # 3. Process each image in batch
+                for b in range(B):
+                    img_path = batch_paths[b]
+                    img_filename = os.path.basename(img_path)
+                    h_orig = int(batch_h[b])
+                    w_orig = int(batch_w[b])
 
-                scale = 1008.0 / float(max(h_orig, w_orig))
-                new_h = int(round(h_orig * scale))
-                new_w = int(round(w_orig * scale))
+                    scale = 1008.0 / float(max(h_orig, w_orig))
+                    new_h = int(round(h_orig * scale))
+                    new_w = int(round(w_orig * scale))
 
-                # Lookup annotations
-                gt_cells = annotations_by_img.get(img_filename, [])
-                if not gt_cells:
-                    # Try matching filename without extension or case-insensitive
-                    base_no_ext = os.path.splitext(img_filename)[0].lower()
-                    for k, v in annotations_by_img.items():
-                        if os.path.splitext(k)[0].lower() == base_no_ext:
-                            gt_cells = v
-                            break
+                    # Lookup annotations
+                    gt_cells = annotations_by_img.get(img_filename, [])
+                    if not gt_cells:
+                        # Try matching filename without extension or case-insensitive
+                        base_no_ext = os.path.splitext(img_filename)[0].lower()
+                        for k, v in annotations_by_img.items():
+                            if os.path.splitext(k)[0].lower() == base_no_ext:
+                                gt_cells = v
+                                break
 
-                cell_grid_centers = []
+                    cell_grid_centers = []
 
-                # A. Process Ground-Truth Cells
-                for cell in gt_cells:
-                    cx_orig, cy_orig = cell["x"], cell["y"]
-                    w_cell_orig = cell.get("width", 100.0)
-                    h_cell_orig = cell.get("height", 100.0)
-                    cls_name = cell["class_name"]
+                    # A. Process Ground-Truth Cells
+                    for cell in gt_cells:
+                        cx_orig, cy_orig = cell["x"], cell["y"]
+                        w_cell_orig = cell.get("width", 100.0)
+                        h_cell_orig = cell.get("height", 100.0)
+                        cls_name = cell["class_name"]
 
-                    # Map coordinates to 1008x1008 padded image
-                    cx_pad = cx_orig * scale
-                    cy_pad = cy_orig * scale
-                    w_pad = w_cell_orig * scale
-                    h_pad = h_cell_orig * scale
+                        # Map coordinates to 1008x1008 padded image
+                        cx_pad = cx_orig * scale
+                        cy_pad = cy_orig * scale
+                        w_pad = w_cell_orig * scale
+                        h_pad = h_cell_orig * scale
 
-                    x1_pad = cx_pad - w_pad / 2.0
-                    x2_pad = cx_pad + w_pad / 2.0
-                    y1_pad = cy_pad - h_pad / 2.0
-                    y2_pad = cy_pad + h_pad / 2.0
+                        x1_pad = cx_pad - w_pad / 2.0
+                        x2_pad = cx_pad + w_pad / 2.0
+                        y1_pad = cy_pad - h_pad / 2.0
+                        y2_pad = cy_pad + h_pad / 2.0
 
-                    # Map to FPN spatial grid coordinates
-                    r_grid = int(np.clip(cy_pad * (H_feat / 1008.0), 0, H_feat - 1))
-                    c_grid = int(np.clip(cx_pad * (W_feat / 1008.0), 0, W_feat - 1))
-                    cell_grid_centers.append((r_grid, c_grid))
+                        # Map to FPN spatial grid coordinates
+                        r_grid = int(np.clip(cy_pad * (H_feat / 1008.0), 0, H_feat - 1))
+                        c_grid = int(np.clip(cx_pad * (W_feat / 1008.0), 0, W_feat - 1))
+                        cell_grid_centers.append((r_grid, c_grid))
 
-                    # Footprint bounds
-                    r_min = int(np.floor(y1_pad * (H_feat / 1008.0)))
-                    r_max = int(np.ceil(y2_pad * (H_feat / 1008.0)))
-                    c_min = int(np.floor(x1_pad * (W_feat / 1008.0)))
-                    c_max = int(np.ceil(x2_pad * (W_feat / 1008.0)))
+                        # Footprint bounds
+                        r_min = int(np.floor(y1_pad * (H_feat / 1008.0)))
+                        r_max = int(np.ceil(y2_pad * (H_feat / 1008.0)))
+                        c_min = int(np.floor(x1_pad * (W_feat / 1008.0)))
+                        c_max = int(np.ceil(x2_pad * (W_feat / 1008.0)))
 
-                    # Minimum 3x3 window centered at (r_grid, c_grid)
-                    r_start = max(0, min(r_min, r_grid - 1))
-                    r_end = min(H_feat, max(r_max + 1, r_grid + 2))
-                    c_start = max(0, min(c_min, c_grid - 1))
-                    c_end = min(W_feat, max(c_max + 1, c_grid + 2))
+                        # Minimum 3x3 window centered at (r_grid, c_grid)
+                        r_start = max(0, min(r_min, r_grid - 1))
+                        r_end = min(H_feat, max(r_max + 1, r_grid + 2))
+                        c_start = max(0, min(c_min, c_grid - 1))
+                        c_end = min(W_feat, max(c_max + 1, c_grid + 2))
 
-                    # Window slice
-                    sub_z = z_spatial_cpu[b, r_start:r_end, c_start:c_end, :]  # (H_w, W_w, num_concepts)
-                    # Spatial max-pooling across the cell footprint
-                    pooled_z = sub_z.amax(dim=(0, 1)).numpy()  # (num_concepts,)
+                        # Window slice
+                        sub_z = z_spatial_cpu[b, r_start:r_end, c_start:c_end, :]  # (H_w, W_w, num_concepts)
+                        # Spatial max-pooling across the cell footprint
+                        pooled_z = sub_z.amax(dim=(0, 1)).numpy()  # (num_concepts,)
 
-                    # For BSF: extract the 4D subspace coordinate vector at peak activation
-                    subspace_coords = None
-                    if is_bsf:
-                        sub_z_flat = sub_z.reshape(-1, num_concepts)
-                        max_indices = sub_z_flat.argmax(dim=0)  # (num_concepts,)
-                        sub_blk_flat = z_blocks_spatial_cpu[b, r_start:r_end, c_start:c_end, :, :].reshape(-1, num_concepts, group_size)
-                        cell_z_block = sub_blk_flat[max_indices, torch.arange(num_concepts), :].numpy()  # (num_concepts, group_size)
-                        subspace_coords = cell_z_block
-
-                    record = {
-                        "image_path": img_path,
-                        "image_filename": img_filename,
-                        "class_name": cls_name,
-                        "is_cell": True,
-                        "cx_pad": float(cx_pad),
-                        "cy_pad": float(cy_pad),
-                        "x1_pad": float(x1_pad),
-                        "y1_pad": float(y1_pad),
-                        "x2_pad": float(x2_pad),
-                        "y2_pad": float(y2_pad),
-                        "r_grid": r_grid,
-                        "c_grid": c_grid,
-                        "pooled_activation": pooled_z,
-                        "subspace_coords": subspace_coords,
-                    }
-                    all_cell_records.append(record)
-                    total_annotated_cells += 1
-
-                # B. Sample Non-Cell Background / Exudate Tokens (BG_EXUDATE)
-                # Compute token-level mean RGB
-                img_tensor_b = batch_dev[b]
-                mean_rgb = img_tensor_b.mean(dim=0, keepdim=True).unsqueeze(0)
-                mean_rgb_pooled = F.adaptive_avg_pool2d(mean_rgb, (H_feat, W_feat)).squeeze().cpu().numpy()
-
-                stride = 1008.0 / H_feat
-                valid_bg_mask = np.zeros((H_feat, W_feat), dtype=bool)
-
-                for r in range(1, H_feat - 1):
-                    for c in range(1, W_feat - 1):
-                        # Within valid unpadded image boundaries
-                        if (r + 0.5) * stride < new_h and (c + 0.5) * stride < new_w:
-                            if mean_rgb_pooled[r, c] > 0.08:
-                                # Distance constraint: at least 3 FPN grid cells from any cell center
-                                is_far = True
-                                min_dist = 2 if target_layer == "box_head" else 3
-                                for (cr, cc) in cell_grid_centers:
-                                    if max(abs(r - cr), abs(c - cc)) < min_dist:
-                                        is_far = False
-                                        break
-                                if is_far:
-                                    valid_bg_mask[r, c] = True
-
-                bg_r_idx, bg_c_idx = np.where(valid_bg_mask)
-                if len(bg_r_idx) > 0:
-                    n_sample = min(len(bg_r_idx), max_bg_tokens_per_img)
-                    sel_indices = rng.choice(len(bg_r_idx), size=n_sample, replace=False)
-                    for s_i in sel_indices:
-                        r_bg = bg_r_idx[s_i]
-                        c_bg = bg_c_idx[s_i]
-                        bg_act = z_spatial_cpu[b, r_bg, c_bg, :].numpy()
-
-                        bg_subspace = None
+                        # For BSF: extract the 4D subspace coordinate vector at peak activation
+                        subspace_coords = None
                         if is_bsf:
-                            bg_subspace = z_blocks_spatial_cpu[b, r_bg, c_bg, :, :].numpy()
-
-                        cx_bg = (c_bg + 0.5) * stride
-                        cy_bg = (r_bg + 0.5) * stride
+                            sub_z_flat = sub_z.reshape(-1, num_concepts)
+                            max_indices = sub_z_flat.argmax(dim=0)  # (num_concepts,)
+                            sub_blk_flat = z_blocks_spatial_cpu[b, r_start:r_end, c_start:c_end, :, :].reshape(-1, num_concepts, group_size)
+                            cell_z_block = sub_blk_flat[max_indices, torch.arange(num_concepts), :].numpy()  # (num_concepts, group_size)
+                            subspace_coords = cell_z_block
 
                         record = {
                             "image_path": img_path,
                             "image_filename": img_filename,
-                            "class_name": "BG_EXUDATE",
-                            "is_cell": False,
-                            "cx_pad": float(cx_bg),
-                            "cy_pad": float(cy_bg),
-                            "x1_pad": float(cx_bg - 16),
-                            "y1_pad": float(cy_bg - 16),
-                            "x2_pad": float(cx_bg + 16),
-                            "y2_pad": float(cy_bg + 16),
-                            "r_grid": int(r_bg),
-                            "c_grid": int(c_bg),
-                            "pooled_activation": bg_act,
-                            "subspace_coords": bg_subspace,
+                            "class_name": cls_name,
+                            "is_cell": True,
+                            "cx_pad": float(cx_pad),
+                            "cy_pad": float(cy_pad),
+                            "x1_pad": float(x1_pad),
+                            "y1_pad": float(y1_pad),
+                            "x2_pad": float(x2_pad),
+                            "y2_pad": float(y2_pad),
+                            "r_grid": r_grid,
+                            "c_grid": c_grid,
+                            "pooled_activation": pooled_z,
+                            "subspace_coords": subspace_coords,
                         }
                         all_cell_records.append(record)
-                        total_bg_tokens += 1
+                        total_annotated_cells += 1
+
+                    # B. Sample Non-Cell Background / Exudate Tokens (BG_EXUDATE)
+                    # Compute token-level mean RGB
+                    img_tensor_b = batch_dev[b]
+                    mean_rgb = img_tensor_b.mean(dim=0, keepdim=True).unsqueeze(0)
+                    mean_rgb_pooled = F.adaptive_avg_pool2d(mean_rgb, (H_feat, W_feat)).squeeze().cpu().numpy()
+
+                    stride = 1008.0 / H_feat
+                    valid_bg_mask = np.zeros((H_feat, W_feat), dtype=bool)
+
+                    for r in range(1, H_feat - 1):
+                        for c in range(1, W_feat - 1):
+                            # Within valid unpadded image boundaries
+                            if (r + 0.5) * stride < new_h and (c + 0.5) * stride < new_w:
+                                if mean_rgb_pooled[r, c] > 0.08:
+                                    # Distance constraint: at least 3 FPN grid cells from any cell center
+                                    is_far = True
+                                    min_dist = 2 if target_layer == "box_head" else 3
+                                    for (cr, cc) in cell_grid_centers:
+                                        if max(abs(r - cr), abs(c - cc)) < min_dist:
+                                            is_far = False
+                                            break
+                                    if is_far:
+                                        valid_bg_mask[r, c] = True
+
+                    bg_r_idx, bg_c_idx = np.where(valid_bg_mask)
+                    if len(bg_r_idx) > 0:
+                        n_sample = min(len(bg_r_idx), max_bg_tokens_per_img)
+                        sel_indices = rng.choice(len(bg_r_idx), size=n_sample, replace=False)
+                        for s_i in sel_indices:
+                            r_bg = bg_r_idx[s_i]
+                            c_bg = bg_c_idx[s_i]
+                            bg_act = z_spatial_cpu[b, r_bg, c_bg, :].numpy()
+
+                            bg_subspace = None
+                            if is_bsf:
+                                bg_subspace = z_blocks_spatial_cpu[b, r_bg, c_bg, :, :].numpy()
+
+                            cx_bg = (c_bg + 0.5) * stride
+                            cy_bg = (r_bg + 0.5) * stride
+
+                            record = {
+                                "image_path": img_path,
+                                "image_filename": img_filename,
+                                "class_name": "BG_EXUDATE",
+                                "is_cell": False,
+                                "cx_pad": float(cx_bg),
+                                "cy_pad": float(cy_bg),
+                                "x1_pad": float(cx_bg - 16),
+                                "y1_pad": float(cy_bg - 16),
+                                "x2_pad": float(cx_bg + 16),
+                                "y2_pad": float(cy_bg + 16),
+                                "r_grid": int(r_bg),
+                                "c_grid": int(c_bg),
+                                "pooled_activation": bg_act,
+                                "subspace_coords": bg_subspace,
+                            }
+                            all_cell_records.append(record)
+                            total_bg_tokens += 1
 
     finally:
         if handle is not None:

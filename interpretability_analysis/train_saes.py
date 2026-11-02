@@ -7,6 +7,7 @@ import random
 from collections import OrderedDict
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
@@ -489,6 +490,16 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    target_layer = getattr(args, "target_layer", "fpn")
+    if target_layer == "box_head":
+        cache_dir = "./interpretability_analysis/features_box_head"
+        checkpoint_dir = "./interpretability_analysis/checkpoints_box_head"
+        if args.results_dir == "./interpretability_analysis/results":
+            args.results_dir = "./interpretability_analysis/results_box_head"
+    else:
+        cache_dir = "./interpretability_analysis/features"
+        checkpoint_dir = "./interpretability_analysis/checkpoints"
+
     # Results directory setup and overwrite logic
     if args.results_dir:
         os.makedirs(args.results_dir, exist_ok=True)
@@ -510,16 +521,6 @@ def main(args):
         logger = SummaryWriter(log_dir="./runs/sae_interpretability")
     else:
         logger = None
-
-    target_layer = getattr(args, "target_layer", "fpn")
-    if target_layer == "box_head":
-        cache_dir = "./interpretability_analysis/features_box_head"
-        checkpoint_dir = "./interpretability_analysis/checkpoints_box_head"
-        if args.results_dir == "./interpretability_analysis/results":
-            args.results_dir = "./interpretability_analysis/results_box_head"
-    else:
-        cache_dir = "./interpretability_analysis/features"
-        checkpoint_dir = "./interpretability_analysis/checkpoints"
 
     train_cache = os.path.join(cache_dir, "train_features.pt")
     val_cache = os.path.join(cache_dir, "val_features.pt")
